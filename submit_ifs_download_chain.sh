@@ -2,16 +2,16 @@
 
 set -euo pipefail
 
-# submit_ifs_bulk_chain.sh
+# submit_ifs_download_chain.sh
 #
-# Submit multiple copies of submit_ifs_bulk_master.sh in a dependency chain so
+# Submit multiple copies of submit_ifs_download.sh in a dependency chain so
 # that only one runs at a time, and the next starts when the previous finishes
 # (e.g., due to TIMEOUT or completion).
 #
 # Usage examples:
-#   ./submit_ifs_bulk_chain.sh -n 4                    # 4 chained jobs, default dep afterany
-#   ./submit_ifs_bulk_chain.sh -n 6 -d afternotok      # start next only if previous did NOT complete OK
-#   ./submit_ifs_bulk_chain.sh -n 3 -- --partition=normal --time=12:00:00
+#   ./submit_ifs_download_chain.sh -n 4                    # 4 chained jobs, default dep afterany
+#   ./submit_ifs_download_chain.sh -n 6 -d afternotok      # start next only if previous did NOT complete OK
+#   ./submit_ifs_download_chain.sh -n 3 -- --partition=normal --time=12:00:00
 #
 # Flags:
 #   -n N           Number of jobs to queue (default: 4)
@@ -21,7 +21,7 @@ set -euo pipefail
 # Any arguments after "--" are forwarded to sbatch (and override #SBATCH lines if present).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MASTER_SCRIPT="${SCRIPT_DIR}/submit_ifs_bulk_master.sh"
+MASTER_SCRIPT="${SCRIPT_DIR}/submit_ifs_download.sh"
 
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "Error: sbatch not found in PATH." >&2

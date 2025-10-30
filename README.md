@@ -23,13 +23,13 @@ cd /capstor/store/cscs/swissai/a122/IFS/repo-download-ifs
 Use the simple validator (fast, no ECMWF call):
 
 ```bash
-.venv/bin/python validate_setup_simple.py
+.venv/bin/python validate_env_quick.py
 ```
 
 Optionally run the fuller validator that performs a tiny MARS metadata request (requires a valid `~/.ecmwfapirc` and MARS permissions):
 
 ```bash
-.venv/bin/python validate_setup.py
+.venv/bin/python validate_env_full.py
 ```
 
 ### 3. Submit the download job
@@ -37,20 +37,15 @@ Optionally run the fuller validator that performs a tiny MARS metadata request (
 Option A — single run (will stop at time limit):
 
 ```bash
-sbatch submit_ifs_bulk_master.sh
+sbatch submit_ifs_download.sh
 ```
 
 Option B — recommended for long runs: queue a chain of jobs so the next starts when the previous ends (including TIMEOUT):
 
 ```bash
-# Queue 4 chained runs; next starts after the previous finishes for any reason
-./submit_ifs_bulk_chain.sh -n 4
-
-# Only continue when the previous did NOT complete OK (captures TIMEOUT/FAILED)
-./submit_ifs_bulk_chain.sh -n 6 -d afternotok
-
-# Pass extra sbatch options after -- (override partition, time, etc.)
-./submit_ifs_bulk_chain.sh -n 3 -- --partition=normal --time=12:00:00
+./submit_ifs_download_chain.sh -n 4
+./submit_ifs_download_chain.sh -n 6 -d afternotok
+./submit_ifs_download_chain.sh -n 3 -- --partition=normal --time=12:00:00
 ```
 
 ## What you’ll get
@@ -71,13 +66,13 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 
 ## Files included
 
-- Download scripts: `download_ifs_single.py`, `combine_ifs_zarr.py`
-- SLURM scripts: `submit_ifs_bulk_master.sh`, `submit_ifs_bulk_chain.sh` (chained submissions)
-- Validation: `validate_setup_simple.py`, `validate_setup.py`
+- Download scripts: `download_ifs_range.py`, `combine_ifs_zarr.py`
+- SLURM scripts: `submit_ifs_download.sh`, `submit_ifs_download_chain.sh` (chained submissions)
+- Validation: `validate_env_quick.py`, `validate_env_full.py`
 - Virtual environment: `.venv/` with required packages
 - Documentation: this `README.md`
 
-Legacy scripts (original bulk implementation) live under `__obsolete/` and are not used in the current flow.
+
 
 ## Prerequisites
 
@@ -107,24 +102,13 @@ ls -la /capstor/store/cscs/swissai/a122/IFS/
 ### Single date-range download
 
 ```bash
-python download_ifs_single.py \
-   /capstor/store/cscs/swissai/a122/IFS \
-   202301020000 \
-   7 \
-   --interval 6 \
-   --download-type both
+python download_ifs_range.py /capstor/store/cscs/swissai/a122/IFS 202301020000 7 --interval 6 --download-type both
 ```
 
 Very fast test with tiny debug subset:
 
 ```bash
-python download_ifs_single.py \
-   /capstor/store/cscs/swissai/a122/IFS \
-   202301020000 \
-   1 \
-   --interval 6 \
-   --download-type both \
-   --debug-small
+python download_ifs_range.py /capstor/store/cscs/swissai/a122/IFS 202301020000 1 --interval 6 --download-type both --debug-small
 ```
 
 Parameters:
@@ -179,7 +163,7 @@ You can also pass extra sbatch flags when chaining, after `--` (e.g., partition,
 Use the provided virtual environment:
 
 ```bash
-.venv/bin/python validate_setup_simple.py
+.venv/bin/python validate_env_quick.py
 ```
 
 Or create your own conda environment:
@@ -243,10 +227,18 @@ du -sh /capstor/store/cscs/swissai/a122/IFS
 
 ## Performance notes
 
-- Each 7-day period typically takes 2–6 hours depending on system load
-- Full campaign: ~16–48 hours
+- Each 7-day period typically takes ~12 hours depending on system load
+- Full campaign (8 ranges): ~3–5 days
 - Ensemble is fetched in 10-member chunks (5 chunks total for 50 members)
 - Requests are chunked to respect MARS limits; downloads resume and skip existing outputs
+
+## After the download: combine Zarr stores
+
+Combination is executed automatically at the end of `submit_ifs_download.sh`. You can also run it manually:
+
+```bash
+python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm --log-file logs/combine_ifs_manual.log
+```
 
 ## Support
 

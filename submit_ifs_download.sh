@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=ifs_bulk_master          # short name for the job
+#SBATCH --job-name=ifs_download_master          # short name for the job
 #SBATCH --nodes=1                   # number of nodes
 #SBATCH --ntasks-per-node=1         # run 1 task per node
 #SBATCH --gpus-per-node=4           # GPUs per node
@@ -10,7 +10,7 @@
 #SBATCH --time=12:00:00             # total run time (HH:MM:SS)
 #SBATCH --account=a122
 #SBATCH --partition=normal             # partition name
-#SBATCH --output=logs/ifs_bulk_master_%j.out  # output log file
+#SBATCH --output=logs/ifs_download_master_%j.out  # output log file
 #SBATCH --requeue
 
 # Configuration
@@ -148,14 +148,7 @@ for i in "${!date_ranges[@]}"; do
     if [ "$DEBUG_SMALL" = "1" ] || [ "$DEBUG_SMALL" = "true" ] || [ "$DEBUG_SMALL" = "TRUE" ]; then
         DEBUG_ARG="--debug-small"
     fi
-    if "$PYTHON_BIN" download_ifs_single.py \
-        "$OUTPUT_DIR" \
-        "$start_date_formatted" \
-        "$num_days" \
-        --interval "$INTERVAL" \
-        --download-type "$DOWNLOAD_TYPE" \
-        $DEBUG_ARG \
-        --log-file "$log_file"; then
+    if "$PYTHON_BIN" download_ifs_range.py "$OUTPUT_DIR" "$start_date_formatted" "$num_days" --interval "$INTERVAL" --download-type "$DOWNLOAD_TYPE" $DEBUG_ARG --log-file "$log_file"; then
         
         echo "✓ Successfully completed range $range_num: $date_range"
         ((success_count++))
