@@ -13,15 +13,30 @@
 #SBATCH --output=logs/ifs_download_master_%j.out  # output log file
 #SBATCH --requeue
 
-# Configuration
-export OUTPUT_DIR="/capstor/store/cscs/swissai/a122/IFS"
-export INTERVAL=6
-export DOWNLOAD_TYPE="both"
-export DEBUG_SMALL=0
+# Configuration via config.env (single source of truth)
+# You can override the config file path by exporting CONFIG_FILE before sbatch
+#   e.g., CONFIG_FILE=/path/to/config.env sbatch submit_ifs_download.sh
+CONFIG_FILE="${CONFIG_FILE:-$(pwd)/config.env}"
+if [ -f "$CONFIG_FILE" ]; then
+    echo "Loading configuration from $CONFIG_FILE"
+    set -a
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+    set +a
+else
+    echo "No config file found at $CONFIG_FILE, using built-in defaults"
+fi
+
+# Defaults if not provided by config
+export OUTPUT_DIR="${OUTPUT_DIR:-/capstor/store/cscs/swissai/a122/IFS}"
+export INTERVAL="${INTERVAL:-6}"
+export DOWNLOAD_TYPE="${DOWNLOAD_TYPE:-both}"
+export DEBUG_SMALL="${DEBUG_SMALL:-0}"
+export MODEL_NAME="${MODEL_NAME:-esfm}"
 
 # ecCodes library setup (required by earthkit/eccodes)
 # Try to auto-detect an existing ecCodes installation (e.g., in Miniforge/Conda 'apps' env)
-if [ -z "${ECCODES_DIR}" ]; then
+if [ -z "${ECCODES_DIR:-}" ]; then
     for CAND in \
         "$HOME/miniforge3/envs/apps" \
         "$HOME/miniconda3/envs/apps" \
@@ -34,7 +49,7 @@ if [ -z "${ECCODES_DIR}" ]; then
     done
 fi
 
-if [ -n "${ECCODES_DIR}" ]; then
+if [ -n "${ECCODES_DIR:-}" ]; then
     export LD_LIBRARY_PATH="${ECCODES_DIR}/lib:${LD_LIBRARY_PATH}"
     if [ -d "${ECCODES_DIR}/share/eccodes/definitions" ]; then
         export ECCODES_DEFINITION_PATH="${ECCODES_DIR}/share/eccodes/definitions"
@@ -70,18 +85,22 @@ else
 fi
 
 # Define the date ranges and process each one
-# Use a safer delimiter '|' between start and end to avoid accidental splitting on ':'
-# Default: 8 one-week periods spanning 2023-2024
-declare -a date_ranges=(
-    "2023-01-02T00|2023-01-08T23"
-    "2023-04-02T00|2023-04-08T23"
-    "2023-07-02T00|2023-07-08T23"
-    "2023-10-02T00|2023-10-08T23"
-    "2024-01-02T00|2024-01-08T23"
-    "2024-04-02T00|2024-04-08T23"
-    "2024-07-02T00|2024-07-08T23"
-    "2024-10-02T00|2024-10-08T23"
-)
+# Use '|' delimiter between start and end; ranges provided via DATE_RANGES in config.env
+declare -a date_ranges=()
+if [ -n "${DATE_RANGES:-}" ]; then
+    IFS=',' read -r -a date_ranges <<< "${DATE_RANGES}"
+else
+    date_ranges=(
+        "2023-01-02T00|2023-01-08T23"
+        "2023-04-02T00|2023-04-08T23"
+        "2023-07-02T00|2023-07-08T23"
+        "2023-10-02T00|2023-10-08T23"
+        "2024-01-02T00|2024-01-08T23"
+        "2024-04-02T00|2024-04-08T23"
+        "2024-07-02T00|2024-07-08T23"
+        "2024-10-02T00|2024-10-08T23"
+    )
+fi
 
 # In debug-small mode, drastically reduce to two very short windows
 if [ "$DEBUG_SMALL" = "1" ] || [ "$DEBUG_SMALL" = "true" ] || [ "$DEBUG_SMALL" = "TRUE" ]; then
@@ -195,7 +214,7 @@ echo "========================================================"
 # Combine per-range archives into consolidated Zarr stores (Zarr v2)
 echo "Combining per-range archives into consolidated outputs..."
 COMBINE_LOG="logs/combine_ifs_${SLURM_JOB_ID:-manual}.log"
-if "$PYTHON_BIN" combine_ifs_zarr.py "$OUTPUT_DIR" --model esfm --log-file "$COMBINE_LOG"; then
+if "$PYTHON_BIN" combine_ifs_zarr.py "$OUTPUT_DIR" --model "$MODEL_NAME" --log-file "$COMBINE_LOG"; then
     echo "✓ Combination complete. See $COMBINE_LOG"
     echo "Combined outputs (if present):"
     [ -d "$OUTPUT_DIR/ifs_ens_combined.zarr" ] && echo "  - $OUTPUT_DIR/ifs_ens_combined.zarr"

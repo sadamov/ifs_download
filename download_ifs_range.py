@@ -16,8 +16,8 @@ import numpy as np
 import xarray as xr
 from earthkit.data import settings
 
-# Fixed model/fields configuration (single source of truth)
-MODEL_NAME = "esfm"
+# Model name can be overridden via environment variable MODEL_NAME (default: esfm)
+MODEL_NAME = os.getenv("MODEL_NAME", "esfm")
 ESFM_FIELDS = {
     "grid": [0.25, 0.25],
     "area": [90, -180, -90, 180],  # Global

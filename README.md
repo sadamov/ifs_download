@@ -12,13 +12,29 @@ This README consolidates the former QUICK_START and README_IFS_DOWNLOAD document
 
 ## Quick start (3 steps)
 
-### 1. Navigate to the repository
+### 1. Configure once
+
+Edit `config.env` to set your output path, date ranges, and options. Keys:
+
+- OUTPUT_DIR: output directory (default: `/capstor/store/cscs/swissai/a122/IFS`)
+- INTERVAL: forecast step in hours (default: 6)
+- DOWNLOAD_TYPE: `ensemble` | `control` | `both` (default: `both`)
+- DEBUG_SMALL: `0` or `1` (1 uses a tiny subset for fast checks)
+- MODEL_NAME: model directory under each date (default: `esfm`)
+- ECCODES_DIR: optional path to ecCodes install (leave empty to auto-detect)
+- DATE_RANGES: comma-separated list of `start|end` pairs, for example:
+
+```text
+DATE_RANGES=2023-01-02T00|2023-01-08T23,2023-04-02T00|2023-04-08T23
+```
+
+### 2. Navigate to the repository
 
 ```bash
 cd /capstor/store/cscs/swissai/a122/IFS/repo-download-ifs
 ```
 
-### 2. Validate your setup
+### 3. Validate your setup
 
 Use the simple validator (fast, no ECMWF call):
 
@@ -32,7 +48,7 @@ Optionally run the fuller validator that performs a tiny MARS metadata request (
 .venv/bin/python validate_env_full.py
 ```
 
-### 3. Submit the download job
+### 4. Submit the download job
 
 Option A — single run (will stop at time limit):
 
@@ -71,8 +87,6 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 - Validation: `validate_env_quick.py`, `validate_env_full.py`
 - Virtual environment: `.venv/` with required packages
 - Documentation: this `README.md`
-
-
 
 ## Prerequisites
 
@@ -238,6 +252,8 @@ Combination is executed automatically at the end of `submit_ifs_download.sh`. Yo
 
 ```bash
 python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm --log-file logs/combine_ifs_manual.log
+
+Note: `submit_ifs_download.sh` automatically reads `config.env` and passes `MODEL_NAME` to the combine step. If you set a different model name in `config.env`, use that here instead of `esfm`.
 ```
 
 ## Support
