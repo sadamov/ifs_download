@@ -546,7 +546,11 @@ def download_ifs_ensemble(
 
 
 def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields, debug_small=False):
-    """Download IFS control data for a specific date."""
+    """Download IFS control data for a specific date.
+
+    Note: For consistency with the ensemble workflow, we always process
+    pressure-level data first and then append single-level (surface) data.
+    """
 
     # Set cache directory
     cache_dir = os.path.join(output_dir, ".earthkit-cache")
@@ -583,22 +587,6 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
 
         logging.info(f"Downloading control data for {date_str} ({num_days} days)")
 
-        # Build the request for single level data
-        request = {
-            "area": area,
-            "class": "od",
-            "date": f"{year}-{month}-{day}",
-            "expver": "1",
-            "grid": grid,
-            "levtype": "sfc",
-            "param": single_level_params,
-            "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
-            "stream": "enfo",
-            "expect": "any",
-            "time": hour,
-            "type": "cf",
-        }
-
         # Define chunking for control run; avoid non-existent dims like 'time' and 'surface'.
         # We hardcode the pressure-level dimension name to 'level'.
         chunks_pl = {
@@ -612,31 +600,25 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
             "latitude": -1,
             "longitude": -1,
         }
-
-        # Retrieve the single level data
-        logging.info("Downloading surface data...")
-        ds_single = earthkit.data.from_source("mars", request, lazily=True)
-        ds_single = (
-            ds_single.to_xarray(chunks=chunks_surface)
-            .drop_vars("valid_time", errors="ignore")
-            .chunk(chunks_surface)
-        )
-        # Rename/cast per-range (no ensemble dim expected for control)
-        ds_single = rename_and_enrich(ds_single, has_ensemble=False, init_dt=date_time)
-        ds_single = cast_float32(ds_single)
-        ds_single = normalize_longitudes(ds_single)
-        if debug_small:
-            log_ds_summary("control.surface.renamed", ds_single)
-
-        # Retrieve the pressure level data
+        # 1) Retrieve and write the pressure-level data first
         logging.info("Downloading pressure level data...")
-        request.update({
+        request_pl = {
+            "area": area,
+            "class": "od",
+            "date": f"{year}-{month}-{day}",
+            "expver": "1",
+            "grid": grid,
             "levtype": "pl",
             "levelist": pressure_levels,
             "param": pressure_level_params,
-        })
+            "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+            "stream": "enfo",
+            "expect": "any",
+            "time": hour,
+            "type": "cf",
+        }
 
-        ds_pressure = earthkit.data.from_source("mars", request, lazily=True)
+        ds_pressure = earthkit.data.from_source("mars", request_pl, lazily=True)
 
         shortnames = list(set(ds_pressure.metadata("shortName")))
         has_r = "r" in shortnames
@@ -662,7 +644,35 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
         ds_to_write = sanitize_dataset_attrs(ds_combined)
         ds_to_write.to_zarr(output_file, consolidated=True, zarr_format=2, mode="w")
 
-        # Add surface data
+        # 2) Retrieve and append the single-level (surface) data
+        logging.info("Downloading surface data...")
+        request_sfc = {
+            "area": area,
+            "class": "od",
+            "date": f"{year}-{month}-{day}",
+            "expver": "1",
+            "grid": grid,
+            "levtype": "sfc",
+            "param": single_level_params,
+            "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+            "stream": "enfo",
+            "expect": "any",
+            "time": hour,
+            "type": "cf",
+        }
+        ds_single = earthkit.data.from_source("mars", request_sfc, lazily=True)
+        ds_single = (
+            ds_single.to_xarray(chunks=chunks_surface)
+            .drop_vars("valid_time", errors="ignore")
+            .chunk(chunks_surface)
+        )
+        # Rename/cast per-range (no ensemble dim expected for control)
+        ds_single = rename_and_enrich(ds_single, has_ensemble=False, init_dt=date_time)
+        ds_single = cast_float32(ds_single)
+        ds_single = normalize_longitudes(ds_single)
+        if debug_small:
+            log_ds_summary("control.surface.renamed", ds_single)
+
         logging.info("Adding surface data...")
         ds_single_sanitized = sanitize_dataset_attrs(ds_single.drop_vars(["z"], errors="ignore"))
         ds_single_sanitized = normalize_time_encodings(ds_single_sanitized)

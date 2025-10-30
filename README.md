@@ -99,11 +99,10 @@ The fuller validator `validate_env_full.py` will attempt a tiny ECMWF request vi
 # Check job status
 squeue -u $USER
 
-# Monitor master job logs
-tail -f logs/ifs_download_master_*.out
+# Monitor main job logs
+tail -f logs/ifs_download_main_*.out
 
-# Monitor per-range Python logs
-tail -f logs/ifs_download_*.log
+# (Per-range Python logs were removed for simplicity; use the main job log above.)
 
 # Check downloaded data
 ls -la /capstor/store/cscs/swissai/a122/IFS/
@@ -232,7 +231,7 @@ ImportError: No module named 'earthkit.data'
 
 ```bash
 squeue -u $USER
-tail -f logs/ifs_download_master_*.out
+tail -f logs/ifs_download_main_*.out
 find /capstor/store/cscs/swissai/a122/IFS -name "*.zarr" -type d | wc -l
 du -sh /capstor/store/cscs/swissai/a122/IFS
 ```
@@ -249,7 +248,14 @@ du -sh /capstor/store/cscs/swissai/a122/IFS
 Combination is executed automatically at the end of `submit_ifs_download.sh`. You can also run it manually:
 
 ```bash
-python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm --log-file logs/combine_ifs_manual.log
+python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm
+```
+
+Outputs are written under the model folder, for example:
+
+```text
+<OUTPUT_DIR>/<MODEL_NAME>/ifs_ens_combined.zarr
+<OUTPUT_DIR>/<MODEL_NAME>/ifs_control_combined.zarr
 ```
 
 Note: `submit_ifs_download.sh` automatically reads `config.env` and passes `MODEL_NAME` to the combine step. If you set a different model name in `config.env`, use that here instead of `esfm`.

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=ifs_download_master          # short name for the job
+#SBATCH --job-name=ifs_download_main          # short name for the job
 #SBATCH --nodes=1                   # number of nodes
 #SBATCH --ntasks-per-node=1         # run 1 task per node
 #SBATCH --gpus-per-node=4           # GPUs per node
@@ -10,7 +10,7 @@
 #SBATCH --time=12:00:00             # total run time (HH:MM:SS)
 #SBATCH --account=a122
 #SBATCH --partition=normal             # partition name
-#SBATCH --output=logs/ifs_download_master_%j.out  # output log file
+#SBATCH --output=logs/ifs_download_main_%j.out  # output log file
 #SBATCH --requeue
 
 # Configuration via config.env (single source of truth)
@@ -19,10 +19,20 @@
 CONFIG_FILE="${CONFIG_FILE:-$(pwd)/config.env}"
 if [ -f "$CONFIG_FILE" ]; then
     echo "Loading configuration from $CONFIG_FILE"
-    set -a
-    # shellcheck disable=SC1090
-    . "$CONFIG_FILE"
-    set +a
+    # Read only KEY=VALUE lines and assign/export safely without evaluating special characters
+    # This avoids issues with characters like '|' being treated as pipes when sourcing.
+    while IFS= read -r __line; do
+        __key="${__line%%=*}"
+        __val="${__line#*=}"
+        # Assign literal value and export
+        printf -v "${__key}" "%s" "${__val}"
+        export "${__key}"
+    done < <(
+        sed -e 's/\r$//' -n \
+            -e '/^[[:space:]]*#/{d;}' \
+            -e '/^[[:space:]]*$/d' \
+            -e '/^[A-Za-z_][A-Za-z0-9_]*=.*/p' -- "$CONFIG_FILE"
+    )
 else
     echo "No config file found at $CONFIG_FILE, using built-in defaults"
 fi
@@ -68,7 +78,7 @@ echo "========================================================"
 echo "Starting IFS bulk download"
 echo "========================================================"
 echo "Output directory: $OUTPUT_DIR"
-echo "Model: esfm"
+echo "Model: $MODEL_NAME"
 echo "Download type: $DOWNLOAD_TYPE"
 echo "Debug small: $DEBUG_SMALL"
 echo "Start time: $(date)"
@@ -157,9 +167,6 @@ for i in "${!date_ranges[@]}"; do
     echo "End date: $end_date_formatted"
     echo "Duration: $num_days days"
     
-    # Create log files for this range
-    log_file="logs/ifs_download_${start_date_formatted}.log"
-    
     # Run the download script
     echo "Starting download..."
     # Conditionally set debug arg
@@ -167,7 +174,7 @@ for i in "${!date_ranges[@]}"; do
     if [ "$DEBUG_SMALL" = "1" ] || [ "$DEBUG_SMALL" = "true" ] || [ "$DEBUG_SMALL" = "TRUE" ]; then
         DEBUG_ARG="--debug-small"
     fi
-    if "$PYTHON_BIN" download_ifs_range.py "$OUTPUT_DIR" "$start_date_formatted" "$num_days" --interval "$INTERVAL" --download-type "$DOWNLOAD_TYPE" $DEBUG_ARG --log-file "$log_file"; then
+    if "$PYTHON_BIN" download_ifs_range.py "$OUTPUT_DIR" "$start_date_formatted" "$num_days" --interval "$INTERVAL" --download-type "$DOWNLOAD_TYPE" $DEBUG_ARG; then
         
         echo "✓ Successfully completed range $range_num: $date_range"
         ((success_count++))
@@ -213,14 +220,12 @@ echo "========================================================"
 
 # Combine per-range archives into consolidated Zarr stores (Zarr v2)
 echo "Combining per-range archives into consolidated outputs..."
-COMBINE_LOG="logs/combine_ifs_${SLURM_JOB_ID:-manual}.log"
-if "$PYTHON_BIN" combine_ifs_zarr.py "$OUTPUT_DIR" --model "$MODEL_NAME" --log-file "$COMBINE_LOG"; then
-    echo "✓ Combination complete. See $COMBINE_LOG"
-    echo "Combined outputs (if present):"
-    [ -d "$OUTPUT_DIR/ifs_ens_combined.zarr" ] && echo "  - $OUTPUT_DIR/ifs_ens_combined.zarr"
-    [ -d "$OUTPUT_DIR/ifs_control_combined.zarr" ] && echo "  - $OUTPUT_DIR/ifs_control_combined.zarr"
+if "$PYTHON_BIN" combine_ifs_zarr.py "$OUTPUT_DIR" --model "$MODEL_NAME"; then
+    echo "✓ Combination complete. Combined outputs (if present):"
+    [ -d "$OUTPUT_DIR/$MODEL_NAME/ifs_ens_combined.zarr" ] && echo "  - $OUTPUT_DIR/$MODEL_NAME/ifs_ens_combined.zarr"
+    [ -d "$OUTPUT_DIR/$MODEL_NAME/ifs_control_combined.zarr" ] && echo "  - $OUTPUT_DIR/$MODEL_NAME/ifs_control_combined.zarr"
 else
-    echo "✗ Combination step failed. See $COMBINE_LOG"
+    echo "✗ Combination step failed. See main job log for details."
 fi
 
 # Exit with error code if any downloads failed

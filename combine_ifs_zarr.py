@@ -9,8 +9,8 @@ Usage:
 
 This script finds archives at: <output_dir>/<YYYYMMDDHHMM>/<model>/(ifs_ens.zarr|ifs_control.zarr)
 and writes combined archives to:
-  <output_dir>/ifs_ens_combined.zarr
-  <output_dir>/ifs_control_combined.zarr
+    <output_dir>/<model>/ifs_ens_combined.zarr
+    <output_dir>/<model>/ifs_control_combined.zarr
 """
 
 import argparse
@@ -92,6 +92,8 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         )
         combined = combined.sortby("init_time")
         # Write out with Zarr v2
+        # Ensure parent directory exists (e.g., <output_dir>/<model>)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
         if os.path.exists(out_path):
             logging.info(f"Overwriting existing combined archive: {out_path}")
             # Clean up to avoid schema conflicts
@@ -127,8 +129,9 @@ def main() -> int:
     ens_items = find_archives(output_dir, model, "ifs_ens.zarr")
     ctrl_items = find_archives(output_dir, model, "ifs_control.zarr")
 
-    ens_out = os.path.join(output_dir, "ifs_ens_combined.zarr")
-    ctrl_out = os.path.join(output_dir, "ifs_control_combined.zarr")
+    # Place combined outputs under the model folder
+    ens_out = os.path.join(output_dir, model, "ifs_ens_combined.zarr")
+    ctrl_out = os.path.join(output_dir, model, "ifs_control_combined.zarr")
 
     ok1 = combine_and_write(ens_items, ens_out, label="ensemble")
     ok2 = combine_and_write(ctrl_items, ctrl_out, label="control")

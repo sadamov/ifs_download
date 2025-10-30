@@ -21,15 +21,15 @@ set -euo pipefail
 # Any arguments after "--" are forwarded to sbatch (and override #SBATCH lines if present).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MASTER_SCRIPT="${SCRIPT_DIR}/submit_ifs_download.sh"
+MAIN_SCRIPT="${SCRIPT_DIR}/submit_ifs_download.sh"
 
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "Error: sbatch not found in PATH." >&2
   exit 1
 fi
 
-if [ ! -x "$MASTER_SCRIPT" ]; then
-  echo "Error: $MASTER_SCRIPT not found or not executable." >&2
+if [ ! -x "$MAIN_SCRIPT" ]; then
+  echo "Error: $MAIN_SCRIPT not found or not executable." >&2
   exit 1
 fi
 
@@ -73,7 +73,7 @@ if ! [[ "$N" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-echo "Submitting $N jobs in a '$DEP_TYPE' chain for: $MASTER_SCRIPT"
+echo "Submitting $N jobs in a '$DEP_TYPE' chain for: $MAIN_SCRIPT"
 if [ ${#SBATCH_EXTRA[@]} -gt 0 ]; then
   echo "Extra sbatch args: ${SBATCH_EXTRA[*]}"
 fi
@@ -81,7 +81,7 @@ fi
 submit_and_get_id() {
   # shellcheck disable=SC2068
   local out
-  out=$(sbatch ${SBATCH_EXTRA[@]:-} "$MASTER_SCRIPT") || return 1
+  out=$(sbatch ${SBATCH_EXTRA[@]:-} "$MAIN_SCRIPT") || return 1
   # Expected format: "Submitted batch job <JOBID>"
   echo "$out" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9]+$/){print $i; exit}}}'
 }
@@ -90,7 +90,7 @@ submit_with_dep_and_get_id() {
   local dep_job_id="$1"
   # shellcheck disable=SC2068
   local out
-  out=$(sbatch --dependency="${DEP_TYPE}:${dep_job_id}" ${SBATCH_EXTRA[@]:-} "$MASTER_SCRIPT") || return 1
+  out=$(sbatch --dependency="${DEP_TYPE}:${dep_job_id}" ${SBATCH_EXTRA[@]:-} "$MAIN_SCRIPT") || return 1
   echo "$out" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9]+$/){print $i; exit}}}'
 }
 
