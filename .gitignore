@@ -39,3 +39,5 @@ logs/
 *.swp
 *.tmp
 ~$*
+
+__obsolete
