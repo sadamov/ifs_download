@@ -1,0 +1,9 @@
+era5*
+199912250000
+201801010000
+ifs_ens.zarr
+.vscode/
+logs*
+_old
+rechunk.py
+ai_models_ensembles/__pycache__/
