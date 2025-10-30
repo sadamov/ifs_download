@@ -14,19 +14,17 @@ This README consolidates the former QUICK_START and README_IFS_DOWNLOAD document
 
 ### 1. Configure once
 
-Edit `config.env` to set your output path, date ranges, and options. Keys:
+Edit `config.env` to set your output path, date ranges, and options. Keys (see file for examples and defaults):
 
-- OUTPUT_DIR: output directory (default: `/capstor/store/cscs/swissai/a122/IFS`)
-- INTERVAL: forecast step in hours (default: 6)
-- DOWNLOAD_TYPE: `ensemble` | `control` | `both` (default: `both`)
+- OUTPUT_DIR: output directory for data
+- INTERVAL: forecast step in hours
+- DOWNLOAD_TYPE: `ensemble` | `control` | `both`
 - DEBUG_SMALL: `0` or `1` (1 uses a tiny subset for fast checks)
-- MODEL_NAME: model directory under each date (default: `esfm`)
-- ECCODES_DIR: optional path to ecCodes install (leave empty to auto-detect)
-- DATE_RANGES: comma-separated list of `start|end` pairs, for example:
+- MODEL_NAME: model directory written under each date
+- ECCODES_DIR: optional path to ecCodes install (or leave empty for auto-detect)
+- DATE_RANGES: comma-separated list of `start|end` pairs
 
-```text
-DATE_RANGES=2023-01-02T00|2023-01-08T23,2023-04-02T00|2023-04-08T23
-```
+Date ranges are constructed from the `DATE_RANGES` setting in `config.env`; you don’t need to edit the scripts for this.
 
 ### 2. Navigate to the repository
 
@@ -66,7 +64,7 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 
 ## What you’ll get
 
-- 8 periods (8 weeks total, 56 days) covering Jan/Apr/Jul/Oct for 2023 and 2024:
+- By default, 8 periods (8 weeks total, 56 days) covering Jan/Apr/Jul/Oct for 2023 and 2024 (controlled by `DATE_RANGES`):
   - 2023-01-02 to 2023-01-08
   - 2023-04-02 to 2023-04-08
   - 2023-07-02 to 2023-07-08
