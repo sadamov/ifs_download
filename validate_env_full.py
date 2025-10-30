@@ -8,17 +8,39 @@ import sys
 from datetime import datetime
 
 
+def load_config():
+    """Load simple VAR=VALUE pairs from config.env next to this script."""
+    cfg = {}
+    cfg_path = os.path.join(os.path.dirname(__file__), "config.env")
+    try:
+        with open(cfg_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
+
 def check_environment():
     """Check if required Python packages are available."""
     print("Checking Python environment...")
 
-    required_packages = ["earthkit.data", "xarray", "zarr", "dask", "netcdf4"]
+    required_packages = ["earthkit.data", "xarray", "zarr", "dask", "netCDF4"]
 
     missing_packages = []
 
     for package in required_packages:
         try:
-            __import__(package.replace("-", "_"))
+            if package == "netCDF4":
+                __import__("netCDF4")
+            else:
+                __import__(package.replace("-", "_"))
             print(f"  ✓ {package}")
         except ImportError:
             print(f"  ✗ {package} (missing)")
@@ -70,20 +92,22 @@ def check_output_directory(output_dir):
         return False
 
 
-def validate_date_ranges():
-    """Validate the date ranges."""
+def validate_date_ranges(cfg):
+    """Validate the date ranges from config.env (DATE_RANGES) or defaults."""
     print("\nValidating date ranges...")
-
-    date_ranges = [
-        "2023-01-02T00:2023-01-08T23",
-        "2023-04-02T00:2023-04-08T23",
-        "2023-07-02T00:2023-07-08T23",
-        "2023-10-02T00:2023-10-08T23",
-        "2024-01-02T00:2024-01-08T23",
-        "2024-04-02T00:2024-04-08T23",
-        "2024-07-02T00:2024-07-08T23",
-        "2024-10-02T00:2024-10-08T23",
-    ]
+    if cfg.get("DATE_RANGES"):
+        date_ranges = [r.replace("|", ":") for r in cfg["DATE_RANGES"].split(",") if r]
+    else:
+        date_ranges = [
+            "2023-01-02T00:2023-01-08T23",
+            "2023-04-02T00:2023-04-08T23",
+            "2023-07-02T00:2023-07-08T23",
+            "2023-10-02T00:2023-10-08T23",
+            "2024-01-02T00:2024-01-08T23",
+            "2024-04-02T00:2024-04-08T23",
+            "2024-07-02T00:2024-07-08T23",
+            "2024-10-02T00:2024-10-08T23",
+        ]
 
     total_days = 0
 
@@ -110,13 +134,47 @@ def validate_date_ranges():
     return True
 
 
-def check_earthkit_access():
+def setup_eccodes_env(cfg):
+    """Attempt to configure ecCodes environment variables from config or common locations."""
+    eccodes_dir = cfg.get("ECCODES_DIR", "").strip()
+    candidates = []
+    if eccodes_dir:
+        candidates.append(eccodes_dir)
+    # Common paths (align with submit script)
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, "miniforge3", "envs", "apps"),
+        os.path.join(home, "miniconda3", "envs", "apps"),
+        os.path.join("/users", os.getenv("USER", ""), "miniforge3", "envs", "apps"),
+        os.path.join("/users", os.getenv("USER", ""), "miniconda3", "envs", "apps"),
+    ])
+    for cand in candidates:
+        lib = os.path.join(cand, "lib", "libeccodes.so")
+        if os.path.isfile(lib):
+            os.environ["ECCODES_DIR"] = cand
+            os.environ["LD_LIBRARY_PATH"] = f"{os.path.join(cand,'lib')}:{os.environ.get('LD_LIBRARY_PATH','')}"
+            defs = os.path.join(cand, "share", "eccodes", "definitions")
+            if os.path.isdir(defs):
+                os.environ["ECCODES_DEFINITION_PATH"] = defs
+            samples = os.path.join(cand, "share", "eccodes", "samples")
+            if os.path.isdir(samples):
+                os.environ["ECCODES_SAMPLES_PATH"] = samples
+            return cand
+    return None
+
+
+def check_earthkit_access(cfg):
     """Test MARS/ECMWF access through earthkit."""
     print("\nTesting MARS/ECMWF access...")
 
     try:
         import earthkit.data
         from earthkit.data import settings
+
+        # Try to configure ecCodes if available
+        configured = setup_eccodes_env(cfg)
+        if configured:
+            print(f"  Using ecCodes from: {configured}")
 
         # Set a temporary cache directory
         temp_cache = "/tmp/earthkit_test_cache"
@@ -143,7 +201,14 @@ def check_earthkit_access():
 
         # This will test authentication but not download large data
         ds = earthkit.data.from_source("mars", test_request, lazily=True)
-        metadata = ds.metadata()
+        try:
+            metadata = ds.metadata()
+        except RuntimeError as re:
+            if "ecCodes" in str(re):
+                print("  ✗ ecCodes library not found for GRIB decoding")
+                print("    Tip: set ECCODES_DIR in config.env to a valid install, or load a system ecCodes module")
+                return False
+            raise
 
         print(f"  ✓ MARS access successful (found {len(metadata)} records)")
 
@@ -167,14 +232,15 @@ def main():
     print("IFS Bulk Download - Setup Validation")
     print("=" * 50)
 
-    output_dir = "/capstor/store/cscs/swissai/a122/IFS"
+    cfg = load_config()
+    output_dir = cfg.get("OUTPUT_DIR", "/capstor/store/cscs/swissai/a122/IFS")
 
     # Run all checks
     checks = [
         check_environment(),
         check_output_directory(output_dir),
-        validate_date_ranges(),
-        check_earthkit_access(),
+        validate_date_ranges(cfg),
+        check_earthkit_access(cfg),
     ]
 
     print("\n" + "=" * 50)
@@ -184,7 +250,7 @@ def main():
     if all(checks):
         print("✓ All checks passed! Ready to run bulk download.")
         print("\nTo start the download, run:")
-        print("  sbatch submit_ifs_bulk_master.sh")
+        print("  sbatch submit_ifs_download.sh")
         return 0
     else:
         print("✗ Some checks failed. Please fix the issues above.")

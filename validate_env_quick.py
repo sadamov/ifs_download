@@ -7,6 +7,25 @@ import os
 import sys
 from datetime import datetime
 
+
+def load_config():
+    """Load simple VAR=VALUE pairs from config.env next to this script."""
+    cfg = {}
+    cfg_path = os.path.join(os.path.dirname(__file__), "config.env")
+    try:
+        with open(cfg_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+
 def check_environment():
     """Check if required Python packages are available."""
     print("Checking Python environment...")
@@ -79,20 +98,23 @@ def check_output_directory(output_dir):
         return False
 
 
-def validate_date_ranges():
-    """Validate the date ranges."""
+def validate_date_ranges(cfg):
+    """Validate the date ranges from config.env (DATE_RANGES) or defaults."""
     print("\nValidating date ranges...")
-    
-    date_ranges = [
-        "2023-01-02T00:2023-01-08T23",
-        "2023-04-02T00:2023-04-08T23", 
-        "2023-07-02T00:2023-07-08T23",
-        "2023-10-02T00:2023-10-08T23",
-        "2024-01-02T00:2024-01-08T23",
-        "2024-04-02T00:2024-04-08T23",
-        "2024-07-02T00:2024-07-08T23",
-        "2024-10-02T00:2024-10-08T23"
-    ]
+    if cfg.get("DATE_RANGES"):
+        # config.env uses start|end pairs separated by commas
+        date_ranges = [r.replace("|", ":") for r in cfg["DATE_RANGES"].split(",") if r]
+    else:
+        date_ranges = [
+            "2023-01-02T00:2023-01-08T23",
+            "2023-04-02T00:2023-04-08T23",
+            "2023-07-02T00:2023-07-08T23",
+            "2023-10-02T00:2023-10-08T23",
+            "2024-01-02T00:2024-01-08T23",
+            "2024-04-02T00:2024-04-08T23",
+            "2024-07-02T00:2024-07-08T23",
+            "2024-10-02T00:2024-10-08T23",
+        ]
     
     total_days = 0
     
@@ -143,14 +165,15 @@ def check_ecmwf_credentials():
 def main():
     print("IFS Bulk Download - Basic Setup Validation")
     print("="*50)
-    
-    output_dir = "/capstor/store/cscs/swissai/a122/IFS"
+
+    cfg = load_config()
+    output_dir = cfg.get("OUTPUT_DIR", "/capstor/store/cscs/swissai/a122/IFS")
     
     # Run all checks
     checks = [
         check_environment(),
         check_output_directory(output_dir),
-        validate_date_ranges(),
+        validate_date_ranges(cfg),
     ]
     
     # Check credentials but don't fail if missing (can be set up later)
@@ -170,7 +193,7 @@ def main():
             print("  You'll need MARS access permissions for the download to work")
         
         print("\nTo start the download, run:")
-        print("  sbatch submit_ifs_bulk_master.sh")
+        print("  sbatch submit_ifs_download.sh")
         
         if cred_check:
             return 0
