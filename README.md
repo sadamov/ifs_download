@@ -10,7 +10,7 @@ This README consolidates the former QUICK_START and README_IFS_DOWNLOAD document
 /capstor/store/cscs/swissai/a122/IFS/repo-download-ifs
 ```
 
-## Quick start (3 steps)
+## Quick start (4 steps)
 
 ### 1. Configure once
 
@@ -93,7 +93,7 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 - MARS access: ECMWF account with MARS permissions
 - Credentials: create `~/.ecmwfapirc` with your API key (get key from <https://api.ecmwf.int/v1/key/>)
 
-The fuller validator `validate_setup.py` will attempt a tiny ECMWF request via `earthkit.data` to confirm access.
+The fuller validator `validate_env_full.py` will attempt a tiny ECMWF request via `earthkit.data` to confirm access.
 
 ## Monitoring and logs
 
@@ -102,7 +102,7 @@ The fuller validator `validate_setup.py` will attempt a tiny ECMWF request via `
 squeue -u $USER
 
 # Monitor master job logs
-tail -f logs/ifs_bulk_master_*.out
+tail -f logs/ifs_download_master_*.out
 
 # Monitor per-range Python logs
 tail -f logs/ifs_download_*.log
@@ -136,11 +136,11 @@ Parameters:
 
 ### Customization
 
-Edit `submit_ifs_bulk_master.sh` to change the download campaign:
+Prefer editing `config.env` to change the download campaign. If needed, you can also edit `submit_ifs_download.sh`:
 
-- Date ranges: update the `date_ranges` array
+- Date ranges: set `DATE_RANGES` (comma-separated `start|end` pairs)
 - Download type: set `DOWNLOAD_TYPE` (`ensemble`, `control`, or `both`)
-- Output location: modify `OUTPUT_DIR`
+- Output location: set `OUTPUT_DIR`
 - Tiny debug subset: set `DEBUG_SMALL=1` (adds `--debug-small` to the Python call)
 
 You can also pass extra sbatch flags when chaining, after `--` (e.g., partition, time).
@@ -234,7 +234,7 @@ ImportError: No module named 'earthkit.data'
 
 ```bash
 squeue -u $USER
-tail -f logs/ifs_bulk_master_*.out
+tail -f logs/ifs_download_master_*.out
 find /capstor/store/cscs/swissai/a122/IFS -name "*.zarr" -type d | wc -l
 du -sh /capstor/store/cscs/swissai/a122/IFS
 ```
@@ -252,13 +252,13 @@ Combination is executed automatically at the end of `submit_ifs_download.sh`. Yo
 
 ```bash
 python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm --log-file logs/combine_ifs_manual.log
+```
 
 Note: `submit_ifs_download.sh` automatically reads `config.env` and passes `MODEL_NAME` to the combine step. If you set a different model name in `config.env`, use that here instead of `esfm`.
-```
 
 ## Support
 
-1. Run `.venv/bin/python validate_setup.py` to check your setup (and optionally MARS access)
+1. Run `.venv/bin/python validate_env_full.py` to check your setup (and optionally MARS access)
 2. Inspect logs in the `logs/` directory
 3. Verify ECMWF account and MARS permissions
 4. Ensure sufficient disk space is available
