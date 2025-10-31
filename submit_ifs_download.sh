@@ -38,7 +38,8 @@ else
 fi
 
 # Defaults if not provided by config
-export OUTPUT_DIR="${OUTPUT_DIR:-/capstor/store/cscs/swissai/a122/IFS}"
+# By default, store outputs under the current working directory
+export OUTPUT_DIR="${OUTPUT_DIR:-$PWD/ifs_output}"
 export INTERVAL="${INTERVAL:-6}"
 export DOWNLOAD_TYPE="${DOWNLOAD_TYPE:-both}"
 export DEBUG_SMALL="${DEBUG_SMALL:-0}"

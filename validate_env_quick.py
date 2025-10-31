@@ -167,7 +167,8 @@ def main():
     print("="*50)
 
     cfg = load_config()
-    output_dir = cfg.get("OUTPUT_DIR", "/capstor/store/cscs/swissai/a122/IFS")
+    # Use configured OUTPUT_DIR if set and non-empty; otherwise default to ./ifs_output
+    output_dir = cfg.get("OUTPUT_DIR") or os.path.join(os.getcwd(), "ifs_output")
     
     # Run all checks
     checks = [

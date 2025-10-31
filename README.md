@@ -4,11 +4,9 @@ Streamlined tools to download IFS (Integrated Forecasting System) data from ECMW
 
 This README consolidates the former QUICK_START and README_IFS_DOWNLOAD documents.
 
-## Repository location (on CSCS)
+## Works anywhere
 
-```text
-/capstor/store/cscs/swissai/a122/IFS/repo-download-ifs
-```
+You can clone and run this repository from any directory. Outputs can be written to any filesystem location by setting `OUTPUT_DIR` in `config.env` (absolute or relative). If `OUTPUT_DIR` is not set, the default is a local folder `./ifs_output` under the current working directory.
 
 ## Quick start (4 steps)
 
@@ -29,7 +27,7 @@ Date ranges are constructed from the `DATE_RANGES` setting in `config.env`; you 
 ### 2. Navigate to the repository
 
 ```bash
-cd /capstor/store/cscs/swissai/a122/IFS/repo-download-ifs
+cd <path-to-your-cloned-repo>
 ```
 
 ### 3. Validate your setup
@@ -76,7 +74,6 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 - Both ensemble (50 members) and control forecasts
 - Zarr outputs suitable for analysis
 - Estimated size: ~2.8 TB total
-- Output root: `/capstor/store/cscs/swissai/a122/IFS/`
 
 ## Files included
 
@@ -104,8 +101,8 @@ tail -f logs/ifs_download_main_*.out
 
 # (Per-range Python logs were removed for simplicity; use the main job log above.)
 
-# Check downloaded data
-ls -la /capstor/store/cscs/swissai/a122/IFS/
+# Check downloaded data (replace with your configured output dir)
+ls -la "$OUTPUT_DIR"
 ```
 
 ## Detailed usage
@@ -113,13 +110,13 @@ ls -la /capstor/store/cscs/swissai/a122/IFS/
 ### Single date-range download
 
 ```bash
-python download_ifs_range.py /capstor/store/cscs/swissai/a122/IFS 202301020000 7 --interval 6 --download-type both
+python download_ifs_range.py <OUTPUT_DIR> 202301020000 7 --interval 6 --download-type both
 ```
 
 Very fast test with tiny debug subset:
 
 ```bash
-python download_ifs_range.py /capstor/store/cscs/swissai/a122/IFS 202301020000 1 --interval 6 --download-type both --debug-small
+python download_ifs_range.py <OUTPUT_DIR> 202301020000 1 --interval 6 --download-type both --debug-small
 ```
 
 Parameters:
@@ -145,7 +142,7 @@ You can also pass extra sbatch flags when chaining, after `--` (e.g., partition,
 ## Data structure
 
 ```text
-/capstor/store/cscs/swissai/a122/IFS/
+<OUTPUT_DIR>/
 ├── 202301020000/
 │   └── esfm/
 │       ├── fields.txt
@@ -216,7 +213,7 @@ Check your ECMWF credentials and network access
 1. Disk space — ensure capacity on the target filesystem
 
 ```bash
-df -h /capstor/store/cscs/swissai/a122/IFS
+df -h "$OUTPUT_DIR"
 ```
 
 1. Import error — activate the correct environment or install missing packages
@@ -232,8 +229,8 @@ ImportError: No module named 'earthkit.data'
 ```bash
 squeue -u $USER
 tail -f logs/ifs_download_main_*.out
-find /capstor/store/cscs/swissai/a122/IFS -name "*.zarr" -type d | wc -l
-du -sh /capstor/store/cscs/swissai/a122/IFS
+find "$OUTPUT_DIR" -name "*.zarr" -type d | wc -l
+du -sh "$OUTPUT_DIR"
 ```
 
 ## Performance notes
@@ -248,7 +245,7 @@ du -sh /capstor/store/cscs/swissai/a122/IFS
 Combination is executed automatically at the end of `submit_ifs_download.sh`. You can also run it manually:
 
 ```bash
-python combine_ifs_zarr.py /capstor/store/cscs/swissai/a122/IFS --model esfm
+python combine_ifs_zarr.py <OUTPUT_DIR> --model esfm
 ```
 
 Outputs are written under the model folder, for example:
