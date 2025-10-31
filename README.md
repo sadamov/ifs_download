@@ -266,3 +266,13 @@ Note: `submit_ifs_download.sh` automatically reads `config.env` and passes `MODE
 2. Inspect logs in the `logs/` directory
 3. Verify ECMWF account and MARS permissions
 4. Ensure sufficient disk space is available
+
+## Data and Terms
+
+This project only provides code. Any ECMWF, Copernicus, or other third‑party data you download with it remain subject to their respective licences and terms.
+
+- ECMWF Open Data Licence: [https://www.ecmwf.int/en/forecasts/datasets/open-data-licence](https://www.ecmwf.int/en/forecasts/datasets/open-data-licence)
+- Copernicus Climate Data Store Terms: [https://cds.climate.copernicus.eu/terms](https://cds.climate.copernicus.eu/terms)
+- Check any institutional/archive-specific terms that may apply.
+
+Users are responsible for ensuring compliance when redistributing datasets produced by this code.
