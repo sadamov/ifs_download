@@ -160,6 +160,13 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         # Rechunk the dataset
         logging.info(f"Rechunking with: {chunk_dict}")
         combined = combined.chunk(chunk_dict)
+        
+        # Clean up problematic attributes that conflict with encoding
+        # Remove 'dtype' from coordinate attributes if present
+        for coord_name in combined.coords:
+            if "dtype" in combined[coord_name].attrs:
+                logging.info(f"Removing 'dtype' attribute from {coord_name}")
+                combined[coord_name].attrs.pop("dtype")
 
         # Explicitly set encoding chunks for each variable to ensure they persist on write
         for var_name in combined.data_vars:
