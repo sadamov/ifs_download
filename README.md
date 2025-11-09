@@ -2,8 +2,6 @@
 
 Streamlined tools to download IFS (Integrated Forecasting System) data from ECMWF/MARS for multiple date ranges, with SLURM job helpers and a tiny debug mode for quick validation.
 
-This README consolidates the former QUICK_START and README_IFS_DOWNLOAD documents.
-
 ## Works anywhere
 
 You can clone and run this repository from any directory. Outputs can be written to any filesystem location by setting `OUTPUT_DIR` in `config.env` (absolute or relative). If `OUTPUT_DIR` is not set, the default is a local folder `./ifs_output` under the current working directory.
