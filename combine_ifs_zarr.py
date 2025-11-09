@@ -20,6 +20,7 @@ import os
 from datetime import datetime
 from typing import List, Tuple
 
+import numpy as np
 import xarray as xr
 
 
@@ -59,8 +60,22 @@ def find_archives(output_dir: str, model: str, name: str) -> List[Tuple[datetime
 
 
 def open_and_tag(path: str, dt: datetime) -> xr.Dataset:
-    # No schema adjustments here; per-range archives must already conform
+    # Open the zarr archive - time coordinates should already be properly typed from download
     ds = xr.open_zarr(path, consolidated=True)
+
+    # Validate time coordinate types
+    if "init_time" in ds.coords:
+        if ds.coords["init_time"].dtype != np.dtype("datetime64[ns]"):
+            logging.warning(
+                f"init_time has unexpected dtype {ds.coords['init_time'].dtype}, expected datetime64[ns]"
+            )
+
+    if "lead_time" in ds.coords:
+        if not np.issubdtype(ds.coords["lead_time"].dtype, np.timedelta64):
+            logging.warning(
+                f"lead_time has unexpected dtype {ds.coords['lead_time'].dtype}, expected timedelta64[ns]"
+            )
+
     return ds
 
 
@@ -91,6 +106,54 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
             join="outer",
         )
         combined = combined.sortby("init_time")
+
+        # Rechunk to ensure proper alignment for Zarr writing
+        # Determine if this is ensemble data (has 'ensemble' dimension) or control data
+        has_ensemble = "ensemble" in combined.dims
+
+        # Build chunking dict based on available dimensions
+        chunk_dict = {
+            "init_time": 1,
+            "lead_time": 1,
+            "latitude": -1,
+            "longitude": -1,
+        }
+
+        if has_ensemble:
+            # Chunk ensemble dimension as full size (not by 10)
+            chunk_dict["ensemble"] = -1
+
+        # Only add 'level' if it exists in dimensions
+        if "level" in combined.dims:
+            chunk_dict["level"] = 1
+
+        # Rechunk the dataset
+        logging.info(f"Rechunking with: {chunk_dict}")
+        combined = combined.chunk(chunk_dict)
+
+        # Explicitly set encoding chunks for each variable to ensure they persist on write
+        for var_name in combined.data_vars:
+            var = combined[var_name]
+            encoding_chunks = []
+            for dim in var.dims:
+                if dim == "ensemble":
+                    encoding_chunks.append(combined.sizes["ensemble"])  # Full ensemble size
+                elif dim == "init_time":
+                    encoding_chunks.append(1)
+                elif dim == "lead_time":
+                    encoding_chunks.append(1)
+                elif dim == "level":
+                    encoding_chunks.append(1)
+                elif dim == "latitude":
+                    encoding_chunks.append(combined.sizes["latitude"])
+                elif dim == "longitude":
+                    encoding_chunks.append(combined.sizes["longitude"])
+                else:
+                    encoding_chunks.append(combined.sizes[dim])
+
+            var.encoding["chunks"] = tuple(encoding_chunks)
+            logging.info(f"Set encoding chunks for {var_name}: {tuple(encoding_chunks)}")
+
         # Write out with Zarr v2
         # Ensure parent directory exists (e.g., <output_dir>/<model>)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -105,6 +168,9 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         return True
     except Exception as e:
         logging.error(f"Failed to write combined {label} archive: {e}")
+        import traceback
+
+        traceback.print_exc()
         return False
 
 

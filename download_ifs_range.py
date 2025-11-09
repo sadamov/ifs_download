@@ -224,7 +224,9 @@ def normalize_longitudes(ds: xr.Dataset) -> xr.Dataset:
         return ds
     # Detect typical -180..180 range
     if lon_min < 0.0 or lon_max <= 180.0:
-        lon360 = (lon % 360).astype(np.float32) if np.issubdtype(lon.dtype, np.floating) else (lon % 360)
+        lon360 = (
+            (lon % 360).astype(np.float32) if np.issubdtype(lon.dtype, np.floating) else (lon % 360)
+        )
         ds = ds.assign_coords(longitude=lon360)
         ds = ds.sortby("longitude")
     return ds
@@ -242,8 +244,8 @@ def normalize_time_encodings(ds: xr.Dataset) -> xr.Dataset:
     if "init_time" in ds.coords:
         try:
             ds["init_time"] = ds["init_time"].astype("datetime64[ns]")
-            # Remove any CF-style attrs and encoding that could coerce to int on write/read
-            ds["init_time"].encoding = {}
+            # Set dtype explicitly in encoding to prevent xarray from converting to int64
+            ds["init_time"].encoding = {"dtype": "datetime64[ns]"}
             for k in ("units", "calendar"):
                 if k in ds["init_time"].attrs:
                     ds["init_time"].attrs.pop(k, None)
@@ -264,7 +266,8 @@ def normalize_time_encodings(ds: xr.Dataset) -> xr.Dataset:
                 td = (lt_int * np.timedelta64(1, "h")).astype("timedelta64[ns]")
                 ds = ds.assign_coords(lead_time=td)
             # Clear any encoding that might prompt CF conversions back to integers
-            ds["lead_time"].encoding = {}
+            # Set dtype explicitly in encoding to prevent xarray from converting to int64
+            ds["lead_time"].encoding = {"dtype": "timedelta64[ns]"}
             # Also drop confusing attrs like units so xarray doesn't attempt CF decode
             for k in ("units", "calendar"):
                 if k in ds["lead_time"].attrs:
@@ -479,7 +482,9 @@ def download_ifs_ensemble(
                 consolidated=True,
                 mode=write_mode,
                 zarr_format=2,
-                append_dim="ensemble" if (output_exists or i > 0 or start_chunk_index > 0) else None,
+                append_dim="ensemble"
+                if (output_exists or i > 0 or start_chunk_index > 0)
+                else None,
             )
 
         # Add surface data (idempotent): only download/convert if needed
