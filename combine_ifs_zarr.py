@@ -89,47 +89,45 @@ def rename_variables(ds: xr.Dataset) -> xr.Dataset:
 def open_and_tag(archive_path: str, date_tag: datetime) -> xr.Dataset:
     """Open a zarr archive and add the date tag."""
     logging.info(f"Opened {archive_path}")
-    
+
     # Try opening with decode_times=True first, fall back to False if it fails
     try:
         ds = xr.open_zarr(archive_path, consolidated=True)
     except Exception as e:
         if "unable to decode time units" in str(e):
-            logging.info(f"  Falling back to decode_times=False due to time decoding error")
+            logging.info("  Falling back to decode_times=False due to time decoding error")
             ds = xr.open_zarr(archive_path, consolidated=True, decode_times=False)
         else:
             raise
-    
+
     # Check time coordinate types and convert if needed
-    if 'init_time' in ds.coords:
+    if "init_time" in ds.coords:
         logging.info(f"  init_time dtype before: {ds.init_time.dtype}")
         if ds.init_time.dtype == "int64":
             # The int64 value is corrupted (NaN), reconstruct from folder date
             # date_tag is the datetime parsed from the folder name (YYYYMMDDHHMM)
-            init_time_value = np.datetime64(date_tag, 'ns')
-            ds = ds.assign_coords(
-                init_time=np.array([init_time_value])
-            )
+            init_time_value = np.datetime64(date_tag, "ns")
+            ds = ds.assign_coords(init_time=np.array([init_time_value]))
             logging.info(f"  Reconstructed init_time from folder date: {init_time_value}")
             logging.info(f"  init_time dtype after: {ds.init_time.dtype}")
         else:
             logging.info(f"  init_time dtype after: {ds.init_time.dtype}")
-    
-    if 'lead_time' in ds.coords:
+
+    if "lead_time" in ds.coords:
         logging.info(f"  lead_time dtype before: {ds.lead_time.dtype}")
         if ds.lead_time.dtype == "int64":
             # Convert lead_time from int64 (hours) to timedelta64[ns]
             # The attrs say units are 'hours', so interpret as hours
             ds = ds.assign_coords(
-                lead_time=(ds.lead_time.values * np.timedelta64(1, 'h')).astype("timedelta64[ns]")
+                lead_time=(ds.lead_time.values * np.timedelta64(1, "h")).astype("timedelta64[ns]")
             )
             logging.info(f"  lead_time dtype after: {ds.lead_time.dtype}")
         else:
             logging.info(f"  lead_time dtype after: {ds.lead_time.dtype}")
-    
+
     # Rename variables to full descriptive names
     ds = rename_variables(ds)
-    
+
     return ds
 
 
