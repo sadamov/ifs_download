@@ -167,6 +167,7 @@ def rename_and_enrich(ds: xr.Dataset, *, has_ensemble: bool, init_dt: datetime) 
     - number -> ensemble (if present and has_ensemble=True)
     - step -> lead_time (if present)
     - init_time: always added from init_dt; drop any existing 'time' coord
+    - Rename variables to full descriptive names
     """
     rename_map = {}
     if has_ensemble and ("number" in ds.dims or "number" in ds.coords):
@@ -175,6 +176,23 @@ def rename_and_enrich(ds: xr.Dataset, *, has_ensemble: bool, init_dt: datetime) 
         rename_map["step"] = "lead_time"
     if rename_map:
         ds = ds.rename(rename_map)
+
+    # Rename variables to full descriptive names
+    var_rename_map = {
+        "10u": "10m_u_component_of_wind",
+        "10v": "10m_v_component_of_wind",
+        "2t": "2m_temperature",
+        "msl": "mean_sea_level_pressure",
+        "tp": "total_precipitation",
+        "z": "geopotential",
+        "q": "specific_humidity",
+        "t": "temperature",
+        "u": "u_component_of_wind",
+        "v": "v_component_of_wind",
+    }
+    var_rename_dict = {old: new for old, new in var_rename_map.items() if old in ds.data_vars}
+    if var_rename_dict:
+        ds = ds.rename(var_rename_dict)
 
     # Normalize init_time: drop any existing 'time' coord and set our own anchor
     ts = np.datetime64(init_dt, "ns")

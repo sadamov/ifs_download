@@ -59,6 +59,33 @@ def find_archives(output_dir: str, model: str, name: str) -> List[Tuple[datetime
     return items
 
 
+def rename_variables(ds: xr.Dataset) -> xr.Dataset:
+    """Rename short variable names to full descriptive names."""
+
+    # Mapping from short names to full descriptive names
+    var_rename_map = {
+        "10u": "10m_u_component_of_wind",
+        "10v": "10m_v_component_of_wind",
+        "2t": "2m_temperature",
+        "msl": "mean_sea_level_pressure",
+        "tp": "total_precipitation",
+        "z": "geopotential",
+        "q": "specific_humidity",
+        "t": "temperature",
+        "u": "u_component_of_wind",
+        "v": "v_component_of_wind",
+    }
+
+    # Only rename variables that exist in the dataset
+    rename_dict = {old: new for old, new in var_rename_map.items() if old in ds.data_vars}
+
+    if rename_dict:
+        logging.info(f"Renaming variables: {rename_dict}")
+        ds = ds.rename(rename_dict)
+
+    return ds
+
+
 def open_and_tag(path: str, dt: datetime) -> xr.Dataset:
     # Open the zarr archive - time coordinates should already be properly typed from download
     ds = xr.open_zarr(path, consolidated=True)
@@ -75,6 +102,9 @@ def open_and_tag(path: str, dt: datetime) -> xr.Dataset:
             logging.warning(
                 f"lead_time has unexpected dtype {ds.coords['lead_time'].dtype}, expected timedelta64[ns]"
             )
+
+    # Rename variables to full descriptive names
+    ds = rename_variables(ds)
 
     return ds
 
