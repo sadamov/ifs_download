@@ -87,21 +87,36 @@ def rename_variables(ds: xr.Dataset) -> xr.Dataset:
 
 
 def open_and_tag(path: str, dt: datetime) -> xr.Dataset:
-    # Open the zarr archive - time coordinates should already be properly typed from download
+    # Open the zarr archive
     ds = xr.open_zarr(path, consolidated=True)
 
-    # Validate time coordinate types
+    # Fix time coordinate types if needed
     if "init_time" in ds.coords:
-        if ds.coords["init_time"].dtype != np.dtype("datetime64[ns]"):
-            logging.warning(
-                f"init_time has unexpected dtype {ds.coords['init_time'].dtype}, expected datetime64[ns]"
-            )
+        init_time = ds.coords["init_time"]
+        if init_time.dtype == np.int64:
+            logging.info(f"Converting init_time from int64 to datetime64[ns] in {path}")
+            # Interpret as days since 2023-01-01
+            base_date = np.datetime64("2023-01-01", "ns")
+            init_time_dt = base_date + init_time.values.astype("timedelta64[D]")
+            ds = ds.assign_coords(init_time=init_time_dt)
+        elif init_time.dtype != np.dtype("datetime64[ns]"):
+            logging.warning(f"Converting init_time from {init_time.dtype} to datetime64[ns]")
+            ds = ds.assign_coords(init_time=init_time.values.astype("datetime64[ns]"))
 
     if "lead_time" in ds.coords:
-        if not np.issubdtype(ds.coords["lead_time"].dtype, np.timedelta64):
-            logging.warning(
-                f"lead_time has unexpected dtype {ds.coords['lead_time'].dtype}, expected timedelta64[ns]"
+        lead_time = ds.coords["lead_time"]
+        if lead_time.dtype == np.int64:
+            logging.info(f"Converting lead_time from int64 to timedelta64[ns] in {path}")
+            # Interpret as hours
+            lead_time_td = (lead_time.values.astype("int64") * np.timedelta64(1, "h")).astype(
+                "timedelta64[ns]"
             )
+            ds = ds.assign_coords(lead_time=lead_time_td)
+        elif not np.issubdtype(lead_time.dtype, np.timedelta64):
+            logging.warning(f"Converting lead_time from {lead_time.dtype} to timedelta64[ns]")
+            ds = ds.assign_coords(lead_time=lead_time.values.astype("timedelta64[ns]"))
+        elif lead_time.dtype != np.dtype("timedelta64[ns]"):
+            ds = ds.assign_coords(lead_time=lead_time.values.astype("timedelta64[ns]"))
 
     # Rename variables to full descriptive names
     ds = rename_variables(ds)
@@ -160,7 +175,7 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         # Rechunk the dataset
         logging.info(f"Rechunking with: {chunk_dict}")
         combined = combined.chunk(chunk_dict)
-        
+
         # Clean up problematic attributes that conflict with encoding
         # Remove 'dtype' from coordinate attributes if present
         for coord_name in combined.coords:
