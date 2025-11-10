@@ -131,6 +131,30 @@ def open_and_tag(archive_path: str, date_tag: datetime) -> xr.Dataset:
     return ds
 
 
+def _filter_lead_time(ds: xr.Dataset) -> xr.Dataset:
+    """Ensure lead_time runs from +6h to +168h inclusive in 6-hourly steps.
+
+    Drops any 0h and 1h steps (or any non-multiples of 6h) if present.
+    If lead_time coord is missing, returns ds unchanged.
+    """
+    if "lead_time" not in ds.coords:
+        return ds
+    import os as _os
+    lt_ns = ds["lead_time"].astype("timedelta64[ns]").astype("int64")
+    hours = (lt_ns // 3_600_000_000_000).values
+    max_hours = int(_os.getenv("MAX_LEAD_TIME_HOURS", "168"))
+    interval = int(_os.getenv("INTERVAL", "6"))
+    # snap to interval
+    max_hours = (max_hours // interval) * interval
+    mask = (hours >= interval) & (hours <= max_hours) & (hours % interval == 0)
+    if (~mask).any():
+        idx = np.nonzero(mask)[0]
+        ds = ds.isel(lead_time=idx) if idx.size > 0 else ds.isel(lead_time=slice(0, 0))
+    ds = ds.assign_coords(lead_time=ds["lead_time"].astype("timedelta64[ns]"))
+    ds["lead_time"].encoding = {"dtype": "timedelta64[ns]"}
+    return ds
+
+
 def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: str) -> bool:
     if not items:
         logging.info(f"No {label} archives found to combine.")
@@ -158,6 +182,9 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
             join="outer",
         )
         combined = combined.sortby("init_time")
+
+        # Enforce lead_time policy: keep only +6h..+168h inclusive in 6h steps
+        combined = _filter_lead_time(combined)
 
         # Rechunk to ensure proper alignment for Zarr writing
         # Determine if this is ensemble data (has 'ensemble' dimension) or control data

@@ -333,7 +333,13 @@ def download_ifs_ensemble(
         day = date_time.strftime("%d")
         hour = date_time.strftime("%H")
 
-        logging.info(f"Downloading ensemble data for {date_str} ({num_days} days)")
+        # Use configured max lead time independent of date-range length
+        max_lead_hours = int(os.getenv("MAX_LEAD_TIME_HOURS", str(num_days * 24)))
+        if max_lead_hours % interval != 0:
+            max_lead_hours = (max_lead_hours // interval) * interval
+        logging.info(
+            f"Downloading ensemble data for {date_str} (max lead {max_lead_hours}h, interval {interval}h)"
+        )
 
         # Define chunking separately for pressure-level and single-level data.
         # Important: Avoid using keys that may not exist as dimensions (e.g., 'time', 'surface').
@@ -457,7 +463,7 @@ def download_ifs_ensemble(
                 "levelist": pressure_levels,
                 "param": pressure_level_params,
                 "number": number_chunk,
-                "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+                "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
                 "stream": "enfo",
                 "expect": "any",
                 "time": hour,
@@ -529,7 +535,7 @@ def download_ifs_ensemble(
                 "levtype": "sfc",
                 "number": "1/to/2/by/1" if debug_small else "1/to/50/by/1",
                 "param": single_level_params,
-                "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+                "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
                 "stream": "enfo",
                 "expect": "any",
                 "time": hour,
@@ -608,7 +614,12 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
         day = date_time.strftime("%d")
         hour = date_time.strftime("%H")
 
-        logging.info(f"Downloading control data for {date_str} ({num_days} days)")
+        max_lead_hours = int(os.getenv("MAX_LEAD_TIME_HOURS", str(num_days * 24)))
+        if max_lead_hours % interval != 0:
+            max_lead_hours = (max_lead_hours // interval) * interval
+        logging.info(
+            f"Downloading control data for {date_str} (max lead {max_lead_hours}h, interval {interval}h)"
+        )
 
         # Define chunking for control run; avoid non-existent dims like 'time' and 'surface'.
         # We hardcode the pressure-level dimension name to 'level'.
@@ -634,7 +645,7 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
             "levtype": "pl",
             "levelist": pressure_levels,
             "param": pressure_level_params,
-            "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+            "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
             "stream": "enfo",
             "expect": "any",
             "time": hour,
@@ -677,7 +688,7 @@ def download_ifs_control(output_dir, date_time, num_days, interval=6, *, fields,
             "grid": grid,
             "levtype": "sfc",
             "param": single_level_params,
-            "step": "0/1" if debug_small else f"0/to/{num_days * 24}/by/{interval}",
+            "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
             "stream": "enfo",
             "expect": "any",
             "time": hour,
