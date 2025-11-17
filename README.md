@@ -15,6 +15,7 @@ Edit `config.env` to set your output path, date ranges, and options. Keys (see f
 - OUTPUT_DIR: output directory for data
 - INTERVAL: forecast step in hours
 - DOWNLOAD_TYPE: `ensemble` | `control` | `both`
+- ENSEMBLE_MARS_CHUNK_SIZE: members per MARS request (1-50, default 50 to minimize catalogue calls)
 - DEBUG_SMALL: `0` or `1` (1 uses a tiny subset for fast checks)
 - MODEL_NAME: model directory written under each date
 - ECCODES_DIR: optional path to ecCodes install (or leave empty for auto-detect)
@@ -108,7 +109,7 @@ ls -la "$OUTPUT_DIR"
 ### Single date-range download
 
 ```bash
-python download_ifs_range.py <OUTPUT_DIR> 202301020000 7 --interval 6 --download-type both
+python download_ifs_range.py <OUTPUT_DIR> 202301020000 7 --interval 6 --download-type both --range-end 202301082300
 ```
 
 Very fast test with tiny debug subset:
@@ -123,6 +124,7 @@ Parameters:
 - `date_time`: Start date in `YYYYMMDDHHMM`
 - `num_days`: Number of days to download
 - `--interval`: Time step in hours (default: 6)
+- `--range-end`: Inclusive end datetime (YYYYMMDDHHMM). When set, the script fetches every init_time between `date_time` and `range-end` in one go (respecting `--interval`).
 - `--download-type`: `ensemble`, `control`, or `both` (default: both)
 - `--debug-small`: Tiny subset (coarse grid, small area, 1 PL level/var, 1 SL var, steps 0 and 1, 2 ensemble members)
 
@@ -235,7 +237,8 @@ du -sh "$OUTPUT_DIR"
 
 - Each 7-day period typically takes ~12 hours depending on system load
 - Full campaign (8 ranges): ~3–5 days
-- Ensemble is fetched in 10-member chunks (5 chunks total for 50 members)
+- Ensemble requests default to a single 50-member call; override `ENSEMBLE_MARS_CHUNK_SIZE` if you need smaller batches for memory reasons
+- Each configured date range is downloaded via a single Python invocation that requests every init_time within the range, minimizing the number of MARS catalogue lookups.
 - Requests are chunked to respect MARS limits; downloads resume and skip existing outputs
 
 ## After the download: combine Zarr stores

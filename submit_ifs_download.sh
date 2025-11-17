@@ -121,70 +121,53 @@ if [ "$DEBUG_SMALL" = "1" ] || [ "$DEBUG_SMALL" = "true" ] || [ "$DEBUG_SMALL" =
     )
 fi
 
-# Function to convert date format
-convert_date() {
-    local date_str=$1
-    echo $(date -d "$date_str" +%Y%m%d%H%M)
-}
-
-# Function to calculate days between dates
-calc_days() {
-    local start_date=$1
-    local end_date=$2
-    local start_epoch=$(date -d "$start_date" +%s)
-    local end_epoch=$(date -d "$end_date" +%s)
-    echo $(( (end_epoch - start_epoch) / 86400 + 1 ))
-}
-
 # Process each date range
 total_ranges=${#date_ranges[@]}
 success_count=0
 failed_ranges=()
 
+MAX_LEAD_HOURS=${MAX_LEAD_TIME_HOURS:-240}
+forecast_days=$(( (MAX_LEAD_HOURS + 23) / 24 ))
+if [ "$forecast_days" -lt 1 ]; then
+    forecast_days=1
+fi
+init_step_hours=${INIT_INTERVAL_HOURS:-$INTERVAL}
+init_step_seconds=$((init_step_hours * 3600))
+
 for i in "${!date_ranges[@]}"; do
     range_num=$((i + 1))
     date_range="${date_ranges[$i]}"
-    
+
     echo ""
     echo "========================================================"
     echo "Processing range $range_num/$total_ranges: $date_range"
     echo "========================================================"
-    
-    # Parse the date range using '|' as delimiter (start|end)
+
     IFS='|' read -r start_datetime end_datetime <<< "$date_range"
-
-    # Normalize to full ISO-like strings for date parsing
     start_iso="${start_datetime}:00:00"
-    end_iso="${end_datetime}:59:59"
+    end_iso="${end_datetime}:00:00"
 
-    # Convert to the format expected by the script (YYYYMMDDHHMM)
-    start_date_formatted=$(convert_date "$start_iso")
-    end_date_formatted=$(convert_date "$end_iso")
+    start_label=$(date -u -d "$start_iso" +%Y%m%d%H%M)
+    end_label=$(date -u -d "$end_iso" +%Y%m%d%H%M)
+    start_human=$(date -u -d "$start_iso" +"%Y-%m-%d %H:%M UTC")
+    end_human=$(date -u -d "$end_iso" +"%Y-%m-%d %H:%M UTC")
 
-    # Calculate number of days (inclusive)
-    num_days=$(calc_days "$start_iso" "$end_iso")
-    
-    echo "Start date: $start_date_formatted"
-    echo "End date: $end_date_formatted"
-    echo "Duration: $num_days days"
-    
-    # Run the download script
-    echo "Starting download..."
-    # Conditionally set debug arg
+    echo "Init span: $start_human -> $end_human (interval ${INTERVAL}h)"
+    echo "Forecast days per init: $forecast_days (derived from MAX_LEAD_TIME_HOURS=${MAX_LEAD_HOURS})"
+
     DEBUG_ARG=""
     if [ "$DEBUG_SMALL" = "1" ] || [ "$DEBUG_SMALL" = "true" ] || [ "$DEBUG_SMALL" = "TRUE" ]; then
         DEBUG_ARG="--debug-small"
     fi
-    if "$PYTHON_BIN" download_ifs_range.py "$OUTPUT_DIR" "$start_date_formatted" "$num_days" --interval "$INTERVAL" --download-type "$DOWNLOAD_TYPE" $DEBUG_ARG; then
-        
-        echo "✓ Successfully completed range $range_num: $date_range"
+
+    if "$PYTHON_BIN" download_ifs_range.py "$OUTPUT_DIR" "$start_label" "$forecast_days" --interval "$INTERVAL" --download-type "$DOWNLOAD_TYPE" --range-end "$end_label" $DEBUG_ARG; then
+        echo "✓ Successfully completed range $range_num/$total_ranges"
         ((success_count++))
     else
-        echo "✗ Failed range $range_num: $date_range"
+        echo "✗ Range $range_num/$total_ranges failed"
         failed_ranges+=("$date_range")
     fi
-    
-    # Show progress
+
     echo "Progress: $success_count/$range_num ranges completed successfully"
 done
 
