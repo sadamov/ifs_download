@@ -140,6 +140,7 @@ def _filter_lead_time(ds: xr.Dataset) -> xr.Dataset:
     if "lead_time" not in ds.coords:
         return ds
     import os as _os
+
     lt_ns = ds["lead_time"].astype("timedelta64[ns]").astype("int64")
     hours = (lt_ns // 3_600_000_000_000).values
     max_hours = int(_os.getenv("MAX_LEAD_TIME_HOURS", "168"))
@@ -164,6 +165,8 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
     for dt, p in items:
         try:
             ds = open_and_tag(p, dt)
+            if label == "control" and "ensemble" not in ds.dims:
+                ds = ds.expand_dims(ensemble=[0])
             dsets.append(ds)
             logging.info(f"  included {label}: {p}")
         except Exception as e:
