@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, Set
 
 import earthkit.data
 import numpy as np
@@ -18,29 +18,61 @@ from earthkit.data import settings
 
 # Model name can be overridden via environment variable MODEL_NAME (default: esfm)
 MODEL_NAME = os.getenv("MODEL_NAME", "esfm")
-ESFM_FIELDS = {
-    "grid": [0.25, 0.25],
-    "area": [90, -180, -90, 180],  # Global
-    # Pressure levels and parameters
-    "pressure_levels": [
-        1000,
-        925,
-        850,
-        700,
-        600,
-        500,
-        400,
-        300,
-        250,
-        200,
-        150,
-        100,
-        50,
-    ],
-    "pressure_level_params": ["u", "v", "t", "q", "z"],
-    # Single level parameters
-    "single_level_params": ["2t", "10u", "10v", "msl", "tp", "z"],
-}
+
+
+FIELD_ENV_SPECS: tuple[tuple[str, str, Callable[[str], Any], int | None], ...] = (
+    ("grid", "IFS_GRID", float, 2),
+    ("area", "IFS_AREA", float, 4),
+    ("pressure_levels", "IFS_PRESSURE_LEVELS", int, None),
+    ("pressure_level_params", "IFS_PRESSURE_LEVEL_PARAMS", str, None),
+    ("single_level_params", "IFS_SINGLE_LEVEL_PARAMS", str, None),
+)
+
+
+def _parse_env_list(env_name: str, caster: Callable[[str], Any]) -> list[Any] | None:
+    """Parse a comma-separated environment variable using the provided caster."""
+
+    raw = os.getenv(env_name)
+    if raw is None or raw.strip() == "":
+        return None
+    values: list[Any] = []
+    for token in raw.split(","):
+        stripped = token.strip()
+        if not stripped:
+            continue
+        try:
+            values.append(caster(stripped))
+        except ValueError as exc:  # pragma: no cover - basic config validation
+            raise ValueError(f"{env_name} entry '{stripped}' is invalid: {exc}") from exc
+    if not values:
+        raise ValueError(f"{env_name} did not contain any usable values")
+    return values
+
+
+def load_fields_from_env() -> dict[str, list[Any]]:
+    """Load field selection from environment variables (raises if any are missing)."""
+
+    fields: dict[str, list[Any]] = {}
+    missing: list[str] = []
+    for key, env_name, caster, expected_len in FIELD_ENV_SPECS:
+        parsed = _parse_env_list(env_name, caster)
+        if parsed is None:
+            missing.append(env_name)
+            continue
+        if expected_len is not None and len(parsed) != expected_len:
+            raise ValueError(
+                f"{env_name} must provide exactly {expected_len} comma-separated values"
+            )
+        fields[key] = parsed
+
+    if missing:
+        missing_str = ", ".join(missing)
+        raise ValueError(
+            f"Missing field configuration via environment variables: {missing_str}. "
+            "Set these in config.env before running."
+        )
+
+    return fields
 
 
 def get_debug_fields():
@@ -52,18 +84,6 @@ def get_debug_fields():
         "pressure_level_params": ["u"],  # single PL variable
         "single_level_params": ["2t"],  # single SL variable
     }
-
-
-def build_number_chunks(total_members: int, chunk_size: int):
-    """Return inclusive member ranges capped by chunk_size."""
-    chunk_size = max(1, min(chunk_size, total_members))
-    ranges = []
-    start = 1
-    while start <= total_members:
-        end = min(start + chunk_size - 1, total_members)
-        ranges.append((start, end))
-        start = end + 1
-    return ranges
 
 
 def generate_init_times(
@@ -81,20 +101,6 @@ def generate_init_times(
         inits.append(current)
         current += step
     return inits
-
-
-def group_init_times_by_date(init_times: Sequence[datetime]) -> list[dict[str, Any]]:
-    """Group init_times by calendar date while preserving chronological order."""
-    groups: dict[str, list[datetime]] = {}
-    for dt in init_times:
-        key = dt.strftime("%Y-%m-%d")
-        groups.setdefault(key, []).append(dt)
-    ordered: list[dict[str, Any]] = []
-    for date_str, values in groups.items():
-        values.sort()
-        hours = sorted({dt.strftime("%H") for dt in values})
-        ordered.append({"date": date_str, "datetimes": values[:], "hours": hours})
-    return ordered
 
 
 def to_datetime64(values: Iterable[datetime]) -> np.ndarray:
@@ -151,9 +157,10 @@ def setup_logging(log_file=None):
             level=level,
             format=format_str,
             handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+            force=True,
         )
     else:
-        logging.basicConfig(level=level, format=format_str)
+        logging.basicConfig(level=level, format=format_str, force=True)
 
 
 def create_fields_file(output_path, fields):
@@ -233,6 +240,39 @@ def sanitize_dataset_attrs(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def append_init_to_store(output_file: str, ds: xr.Dataset) -> None:
+    """Persist a single-init dataset by appending along init_time."""
+
+    exists = os.path.exists(output_file)
+    mode = "a" if exists else "w"
+    sanitized = sanitize_dataset_attrs(ds)
+    write_kwargs = {
+        "consolidated": True,
+        "zarr_format": 2,
+        "mode": mode,
+    }
+    if exists:
+        write_kwargs["append_dim"] = "init_time"
+    sanitized.to_zarr(output_file, **write_kwargs)
+
+
+def load_existing_init_times(zarr_path: str) -> Set[np.datetime64]:
+    """Return the set of init_time values already stored in a Zarr archive."""
+
+    existing: Set[np.datetime64] = set()
+    if not os.path.exists(zarr_path):
+        return existing
+    try:
+        ds = xr.open_zarr(zarr_path, consolidated=True)
+        if "init_time" in ds.coords:
+            values = ds["init_time"].values.astype("datetime64[ns]")
+            existing = set(values.tolist())
+        ds.close()
+    except Exception as exc:
+        logging.warning("Failed to inspect existing store %s: %s", zarr_path, exc)
+    return existing
+
+
 def log_ds_summary(name: str, ds: xr.Dataset):
     """Log a concise summary of a Dataset without dumping data."""
     try:
@@ -288,23 +328,26 @@ def rename_and_enrich(
     if var_rename_dict:
         ds = ds.rename(var_rename_dict)
 
-    if "time" in ds.dims or "time" in ds.coords:
-        ds = ds.rename({"time": "init_time"})
     ds = ds.drop_vars(["time"], errors="ignore")
+    if "init_time" in ds.coords and "init_time" not in ds.dims:
+        ds = ds.drop_vars(["init_time"], errors="ignore")
 
+    ts = to_datetime64(init_times) if init_times else None
     if "init_time" not in ds.dims:
-        if not init_times:
+        if ts is None:
             raise ValueError("init_times must be provided when dataset lacks init_time coord")
-        ts = to_datetime64(init_times)
         ds = ds.expand_dims(init_time=ts)
-        ds = ds.assign_coords(init_time=ts)
+    if ts is not None:
+        if ds.sizes.get("init_time", len(ts)) != len(ts):
+            raise ValueError("init_time dimension mismatch")
+        ds = ds.assign_coords(init_time=("init_time", ts))
+    elif "init_time" in ds.dims:
+        ds = ds.assign_coords(init_time=ds["init_time"].astype("datetime64[ns]"))
     else:
-        ds["init_time"] = ds["init_time"].astype("datetime64[ns]")
-        if init_times:
-            target = to_datetime64(init_times)
-            ds = order_init_time(ds, target)
-        else:
-            ds = ds.assign_coords(init_time=ds["init_time"].astype("datetime64[ns]"))
+        raise ValueError("init_times must be provided when dataset lacks init_time dim")
+
+    ds["init_time"] = ds["init_time"].astype("datetime64[ns]")
+    ds["init_time"].attrs = {}
 
     if add_dummy_ensemble and "ensemble" not in ds.dims:
         ds = ds.expand_dims(ensemble=[0])
@@ -400,15 +443,20 @@ def normalize_time_encodings(ds: xr.Dataset) -> xr.Dataset:
     if "lead_time" in ds.coords:
         lt = ds["lead_time"]
         try:
-            if np.issubdtype(lt.dtype, np.timedelta64):
-                # Normalize to ns resolution
-                ds["lead_time"] = lt.astype("timedelta64[ns]")
+            raw = lt.values
+            if np.issubdtype(raw.dtype, np.timedelta64):
+                ints = raw.astype("int64")
+                # Genuine ns values are O(1e14); smaller numbers mean the array still
+                # stores lead times as bare hours, so rescale explicitly.
+                if ints.size and np.nanmax(np.abs(ints)) < 10**10:
+                    td = (ints * np.timedelta64(1, "h")).astype("timedelta64[ns]")
+                else:
+                    td = raw.astype("timedelta64[ns]")
             else:
                 # Treat numeric lead_time as hours by convention (IFS step is in hours)
-                # Works for both integer and float inputs.
-                lt_int = lt.astype("int64")
-                td = (lt_int * np.timedelta64(1, "h")).astype("timedelta64[ns]")
-                ds = ds.assign_coords(lead_time=td)
+                ints = raw.astype("int64")
+                td = (ints * np.timedelta64(1, "h")).astype("timedelta64[ns]")
+            ds = ds.assign_coords(lead_time=("lead_time", td))
             # Clear any encoding that might prompt CF conversions back to integers
             # Set dtype explicitly in encoding to prevent xarray from converting to int64
             ds["lead_time"].encoding = {"dtype": "timedelta64[ns]"}
@@ -439,9 +487,9 @@ def download_ifs_ensemble(
         else ordered_inits[0].strftime("%Y-%m-%d %H:%M")
     )
     expected_init_count = len(ordered_inits)
-    date_groups = group_init_times_by_date(ordered_inits)
-    if not date_groups:
-        logging.warning("Unable to group init_times for ensemble download; nothing to do.")
+    requested_init_set = {np.datetime64(dt, "ns") for dt in ordered_inits}
+    if not ordered_inits:
+        logging.warning("Unable to prepare init_times for ensemble download; nothing to do.")
         return True
 
     # Set cache directory
@@ -479,7 +527,6 @@ def download_ifs_ensemble(
             max_lead_hours,
         )
 
-        # Define chunking separately for pressure-level and single-level data.
         chunks_pl = {
             "number": -1,
             "step": 1,
@@ -495,140 +542,92 @@ def download_ifs_ensemble(
         }
 
         expected_ensemble = 2 if debug_small else 50
-
-        # Early completeness check: require both ensemble count and init_time coverage
+        existing_init_times = load_existing_init_times(output_file)
         if output_exists:
             try:
                 existing = xr.open_zarr(output_file, consolidated=True)
                 existing_count = int(existing.sizes.get("ensemble", 0))
-                has_surface_t2 = "2t" in existing.data_vars
-                has_all_init = "init_time" in existing.coords and init_coord_matches(
-                    existing["init_time"], ordered_inits
+                has_surface_data = (
+                    "2m_temperature" in existing.data_vars or "2t" in existing.data_vars
                 )
                 existing.close()
-                if existing_count >= expected_ensemble and has_surface_t2 and has_all_init:
+                if (
+                    requested_init_set.issubset(existing_init_times)
+                    and existing_count >= expected_ensemble
+                    and has_surface_data
+                ):
                     logging.info(
-                        "Existing ensemble store appears complete (ensemble=%d, init_times=%d). Skipping.",
-                        existing_count,
-                        expected_init_count,
+                        "Existing ensemble store already complete (%d init_times). Skipping.",
+                        len(existing_init_times),
                     )
                     return True
-            except Exception as e:
-                logging.warning(
-                    "Failed to open existing ensemble store for completeness check: %s. Will proceed.",
-                    e,
-                )
-
-        default_chunk_size = expected_ensemble
-        chunk_size_env = os.getenv("ENSEMBLE_MARS_CHUNK_SIZE")
-        if chunk_size_env:
-            try:
-                default_chunk_size = int(chunk_size_env)
-            except ValueError:
-                logging.warning(
-                    "Invalid ENSEMBLE_MARS_CHUNK_SIZE=%s, falling back to %d",
-                    chunk_size_env,
-                    expected_ensemble,
-                )
-                default_chunk_size = expected_ensemble
-        if default_chunk_size <= 0:
-            logging.warning(
-                "ENSEMBLE_MARS_CHUNK_SIZE must be positive; received %d. Using %d instead.",
-                default_chunk_size,
-                expected_ensemble,
-            )
-            default_chunk_size = expected_ensemble
-
-        number_chunks = build_number_chunks(expected_ensemble, default_chunk_size)
-        used_chunk_size = number_chunks[0][1] - number_chunks[0][0] + 1 if number_chunks else 0
-        logging.info(
-            "Ensemble chunking: %d member(s) per MARS request -> %d request(s) total",
-            used_chunk_size,
-            len(number_chunks),
-        )
-
-        start_chunk_index = 0
-        if output_exists:
-            try:
-                existing = xr.open_zarr(output_file, consolidated=True)
-                existing_count = int(existing.sizes.get("ensemble", 0))
-                chunk_sizes = [(end - start + 1) for start, end in number_chunks]
-                cum = 0
-                exact = False
-                for idx, cs in enumerate(chunk_sizes):
-                    if cum + cs == existing_count:
-                        start_chunk_index = idx + 1
-                        exact = True
-                        break
-                    elif cum + cs > existing_count:
-                        exact = False
-                        break
-                    cum += cs
-                if existing_count == 0:
-                    start_chunk_index = 0
-                    exact = True
-                if not exact and existing_count > 0:
+                if existing_count < expected_ensemble:
                     logging.warning(
-                        "Existing ensemble store is not aligned to chunk boundaries (found %d members). "
-                        "Restarting this range from scratch.",
+                        "Existing ensemble dimension %d smaller than expected %d; new data will be appended.",
                         existing_count,
+                        expected_ensemble,
                     )
-                    import shutil
-
-                    shutil.rmtree(output_file, ignore_errors=True)
-                    output_exists = False
-                    start_chunk_index = 0
-                existing.close()
+                if not has_surface_data:
+                    logging.warning(
+                        "Existing ensemble store lacks surface vars; new runs will replenish them."
+                    )
             except Exception as e:
-                logging.warning(f"Failed to inspect existing ensemble store for resume: {e}")
-                start_chunk_index = 0
+                logging.warning(
+                    "Failed to inspect existing ensemble store for incremental writes: %s", e
+                )
+                existing_init_times = set()
 
-        # Retrieve the pressure level data in chunks across all requested dates
-        for i, (chunk_start, chunk_end) in enumerate(number_chunks):
-            if i < start_chunk_index:
+        step_ranges = ["0/1"] if debug_small else [f"{interval}/to/{max_lead_hours}/by/{interval}"]
+        number_token = "1/to/2/by/1" if debug_small else "1/to/50/by/1"
+        total_inits = len(ordered_inits)
+
+        for idx, init_dt in enumerate(ordered_inits, start=1):
+            init_key = np.datetime64(init_dt, "ns")
+            if init_key in existing_init_times:
                 logging.info(
-                    f"Skipping already completed ensemble chunk {i + 1}/{len(number_chunks)}"
+                    "Ensemble init %s already persisted; skipping (%d/%d).",
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
+                    idx,
+                    total_inits,
                 )
                 continue
-            logging.info(
-                "Processing ensemble chunk %d/%d: members %d-%d across %d day(s)",
-                i + 1,
-                len(number_chunks),
-                chunk_start,
-                chunk_end,
-                len(date_groups),
-            )
 
-            chunk_dsets: list[xr.Dataset] = []
-            for group in date_groups:
-                hours_token = "/".join(group["hours"])
+            date_token = init_dt.strftime("%Y-%m-%d")
+            hour_token = init_dt.strftime("%H")
+
+            init_step_sets: list[xr.Dataset] = []
+            for step_expr in step_ranges:
                 request_pl = {
                     "area": area,
                     "class": "od",
-                    "date": group["date"],
+                    "date": date_token,
                     "expver": "1",
                     "grid": grid,
                     "levtype": "pl",
                     "levelist": pressure_levels,
                     "param": pressure_level_params,
-                    "number": f"{chunk_start}/to/{chunk_end}/by/1",
-                    "step": "0/1"
-                    if debug_small
-                    else f"{interval}/to/{max_lead_hours}/by/{interval}",
+                    "number": number_token,
+                    "step": step_expr,
                     "stream": "enfo",
                     "expect": "any",
-                    "time": hours_token,
+                    "time": hour_token,
                     "type": "pf",
                 }
 
-                ds_pressure_chunk = earthkit.data.from_source("mars", request_pl, lazily=True)
-                shortnames = list(set(ds_pressure_chunk.metadata("shortName")))
+                logging.info(
+                    "Submitting ensemble pressure request for init %s step %s",
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
+                    step_expr,
+                )
+
+                ds_pressure = earthkit.data.from_source("mars", request_pl, lazily=True)
+                shortnames = list(set(ds_pressure.metadata("shortName")))
                 has_r = "r" in shortnames
                 normal_vars = [var for var in shortnames if var != "r"]
 
-                ds_normal = ds_pressure_chunk.sel(shortName=normal_vars).to_xarray(chunks=chunks_pl)
+                ds_normal = ds_pressure.sel(shortName=normal_vars).to_xarray(chunks=chunks_pl)
                 if has_r:
-                    ds_special = ds_pressure_chunk.sel(shortName=["r"]).to_xarray(chunks=chunks_pl)
+                    ds_special = ds_pressure.sel(shortName=["r"]).to_xarray(chunks=chunks_pl)
                     ds_combined = xr.merge([ds_normal, ds_special])
                 else:
                     ds_combined = ds_normal
@@ -637,76 +636,54 @@ def download_ifs_ensemble(
                 ds_combined = rename_and_enrich(
                     ds_combined,
                     has_ensemble=True,
-                    init_times=group["datetimes"],
+                    init_times=[init_dt],
                 )
                 ds_combined = cast_float32(ds_combined)
                 ds_combined = normalize_longitudes(ds_combined)
                 ds_combined = normalize_latitudes(ds_combined)
                 ds_combined = normalize_time_encodings(ds_combined)
                 if debug_small:
-                    log_ds_summary(f"ensemble.pl.chunk{i + 1}.{group['date']}", ds_combined)
-                chunk_dsets.append(ds_combined)
+                    log_ds_summary(f"ensemble.pl.{init_dt:%Y%m%d%H}.{step_expr}", ds_combined)
+                init_step_sets.append(ds_combined)
 
-            if not chunk_dsets:
-                logging.error("No pressure-level datasets retrieved for ensemble chunk %d", i + 1)
+            if not init_step_sets:
+                logging.error("No pressure data retrieved for ensemble init %s", init_dt)
                 return False
 
-            chunk_dataset = xr.concat(chunk_dsets, dim="init_time")
-            chunk_dataset = chunk_dataset.sortby("init_time")
-
+            init_pl = (
+                xr.concat(init_step_sets, dim="lead_time").sortby("lead_time")
+                if len(init_step_sets) > 1
+                else init_step_sets[0]
+            )
             logging.info(
-                "Writing pressure level data to zarr (chunk %d/%d)...", i + 1, len(number_chunks)
+                "Ensemble pressure complete %d/%d for init %s",
+                idx,
+                total_inits,
+                init_dt.strftime("%Y-%m-%d %H:%M"),
             )
-            ds_to_write = sanitize_dataset_attrs(chunk_dataset)
-            write_mode = "a" if (output_exists or i > 0 or start_chunk_index > 0) else "w"
-            ds_to_write.to_zarr(
-                output_file,
-                consolidated=True,
-                mode=write_mode,
-                zarr_format=2,
-                append_dim="ensemble"
-                if (output_exists or i > 0 or start_chunk_index > 0)
-                else None,
-            )
-            output_exists = True
 
-        # Add surface data (idempotent): only download/convert if needed
-        write_surface = True
-        if os.path.exists(output_file):
-            try:
-                existing = xr.open_zarr(output_file, consolidated=True)
-                if (
-                    "2t" in existing.data_vars
-                    and "init_time" in existing.coords
-                    and init_coord_matches(existing["init_time"], ordered_inits)
-                ):
-                    write_surface = False
-                existing.close()
-            except Exception:
-                write_surface = True
-
-        if write_surface:
-            logging.info("Downloading surface data across %d day(s)...", len(date_groups))
-            surface_dsets: list[xr.Dataset] = []
-            for group in date_groups:
-                hours_token = "/".join(group["hours"])
+            init_surface_sets: list[xr.Dataset] = []
+            for step_expr in step_ranges:
                 request_sfc = {
                     "area": area,
                     "class": "od",
-                    "date": group["date"],
+                    "date": date_token,
                     "expver": "1",
                     "grid": grid,
                     "levtype": "sfc",
-                    "number": "1/to/2/by/1" if debug_small else "1/to/50/by/1",
+                    "number": number_token,
                     "param": single_level_params,
-                    "step": "0/1"
-                    if debug_small
-                    else f"{interval}/to/{max_lead_hours}/by/{interval}",
+                    "step": step_expr,
                     "stream": "enfo",
                     "expect": "any",
-                    "time": hours_token,
+                    "time": hour_token,
                     "type": "pf",
                 }
+                logging.info(
+                    "Submitting ensemble surface request for init %s step %s",
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
+                    step_expr,
+                )
                 ds_single = earthkit.data.from_source("mars", request_sfc, lazily=True)
                 ds_single = (
                     ds_single.to_xarray(chunks=chunks_surface)
@@ -716,35 +693,60 @@ def download_ifs_ensemble(
                 ds_single = rename_and_enrich(
                     ds_single,
                     has_ensemble=True,
-                    init_times=group["datetimes"],
+                    init_times=[init_dt],
                 )
                 ds_single = cast_float32(ds_single)
                 ds_single = normalize_longitudes(ds_single)
                 ds_single = normalize_latitudes(ds_single)
                 if debug_small:
-                    log_ds_summary(f"ensemble.surface.{group['date']}", ds_single)
-                surface_dsets.append(ds_single)
+                    log_ds_summary(f"ensemble.surface.{init_dt:%Y%m%d%H}.{step_expr}", ds_single)
+                init_surface_sets.append(ds_single)
 
-            if surface_dsets:
-                ds_surface = xr.concat(surface_dsets, dim="init_time").sortby("init_time")
+            ds_surface = None
+            if init_surface_sets:
+                ds_surface = (
+                    xr.concat(init_surface_sets, dim="lead_time").sortby("lead_time")
+                    if len(init_surface_sets) > 1
+                    else init_surface_sets[0]
+                )
                 ds_surface = normalize_time_encodings(ds_surface)
                 ds_surface = normalize_longitudes(ds_surface)
                 ds_surface = normalize_latitudes(ds_surface)
-                ds_surface_sanitized = sanitize_dataset_attrs(
-                    ds_surface.drop_vars(["z"], errors="ignore")
-                )
-                ds_surface_sanitized.to_zarr(
-                    output_file,
-                    consolidated=True,
-                    zarr_format=2,
-                    mode="a",
+                logging.info(
+                    "Ensemble surface complete %d/%d for init %s",
+                    idx,
+                    total_inits,
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
                 )
             else:
                 logging.warning(
-                    "No surface datasets retrieved for ensemble request; skipping surface write"
+                    "No surface datasets retrieved for ensemble init %s; continuing without surface fields",
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
                 )
-        else:
-            logging.info("Surface data already present for all init_times; skipping surface write.")
+
+            ds_to_write = (
+                xr.merge([init_pl, ds_surface], compat="no_conflicts")
+                if ds_surface is not None
+                else init_pl
+            )
+            append_init_to_store(output_file, ds_to_write)
+            existing_init_times.add(init_key)
+            logging.info(
+                "Persisted ensemble init %s (%d/%d) to %s",
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+                idx,
+                total_inits,
+                output_file,
+            )
+
+        missing_inits = requested_init_set.difference(existing_init_times)
+        if missing_inits:
+            logging.error(
+                "Ensemble download finished but %d init_times are still missing: %s",
+                len(missing_inits),
+                sorted(str(val) for val in list(missing_inits))[:5],
+            )
+            return False
 
         logging.info(f"Successfully downloaded ensemble data to {output_file}")
         return True
@@ -771,9 +773,9 @@ def download_ifs_control(
         else ordered_inits[0].strftime("%Y-%m-%d %H:%M")
     )
     expected_init_count = len(ordered_inits)
-    date_groups = group_init_times_by_date(ordered_inits)
-    if not date_groups:
-        logging.warning("Unable to group init_times for control download; nothing to do.")
+    requested_init_set = {np.datetime64(dt, "ns") for dt in ordered_inits}
+    if not ordered_inits:
+        logging.warning("Unable to prepare init_times for control download; nothing to do.")
         return True
 
     cache_dir = os.path.join(output_dir, ".earthkit-cache")
@@ -816,46 +818,64 @@ def download_ifs_control(
             "longitude": -1,
         }
 
+        request_step = "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}"
+        existing_init_times = load_existing_init_times(output_file)
         if os.path.exists(output_file):
             try:
                 existing = xr.open_zarr(output_file, consolidated=True)
-                has_all_init = "init_time" in existing.coords and init_coord_matches(
-                    existing["init_time"], ordered_inits
-                )
-                has_dummy_ensemble = existing.sizes.get("ensemble", 0) == 1
-                has_surface = "2t" in existing.data_vars
+                has_surface = "2m_temperature" in existing.data_vars or "2t" in existing.data_vars
                 existing.close()
-                if has_all_init and has_dummy_ensemble and has_surface:
+                if requested_init_set.issubset(existing_init_times) and has_surface:
                     logging.info(
                         "Control store already complete for %s (%d init_times); skipping.",
                         init_summary,
                         expected_init_count,
                     )
                     return True
+                if not has_surface:
+                    logging.warning(
+                        "Existing control store missing surface vars; new downloads will append them."
+                    )
             except Exception as e:
                 logging.warning(
-                    "Failed to inspect existing control store for completeness: %s. Will overwrite.",
-                    e,
+                    "Failed to inspect existing control store for incremental writes: %s", e
                 )
+                existing_init_times = set()
 
-        daily_pl: list[xr.Dataset] = []
-        for group in date_groups:
-            hours_token = "/".join(group["hours"])
+        total_inits = len(ordered_inits)
+        for idx, init_dt in enumerate(ordered_inits, start=1):
+            init_key = np.datetime64(init_dt, "ns")
+            if init_key in existing_init_times:
+                logging.info(
+                    "Control init %s already persisted; skipping (%d/%d).",
+                    init_dt.strftime("%Y-%m-%d %H:%M"),
+                    idx,
+                    total_inits,
+                )
+                continue
+
+            date_token = init_dt.strftime("%Y-%m-%d")
+            hour_token = init_dt.strftime("%H")
             request_pl = {
                 "area": area,
                 "class": "od",
-                "date": group["date"],
+                "date": date_token,
                 "expver": "1",
                 "grid": grid,
                 "levtype": "pl",
                 "levelist": pressure_levels,
                 "param": pressure_level_params,
-                "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
+                "step": request_step,
                 "stream": "enfo",
                 "expect": "any",
-                "time": hours_token,
+                "time": hour_token,
                 "type": "cf",
             }
+
+            logging.info(
+                "Submitting control pressure request for init %s",
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+            )
 
             ds_pressure = earthkit.data.from_source("mars", request_pl, lazily=True)
             shortnames = list(set(ds_pressure.metadata("shortName")))
@@ -873,7 +893,7 @@ def download_ifs_control(
             ds_combined = rename_and_enrich(
                 ds_combined,
                 has_ensemble=False,
-                init_times=group["datetimes"],
+                init_times=[init_dt],
                 add_dummy_ensemble=True,
             )
             ds_combined = cast_float32(ds_combined)
@@ -881,38 +901,32 @@ def download_ifs_control(
             ds_combined = normalize_latitudes(ds_combined)
             ds_combined = normalize_time_encodings(ds_combined)
             if debug_small:
-                log_ds_summary(f"control.pl.{group['date']}", ds_combined)
-            daily_pl.append(ds_combined)
+                log_ds_summary(f"control.pl.{init_dt:%Y%m%d%H}", ds_combined)
+            logging.info(
+                "Control pressure complete %d/%d for init %s",
+                idx,
+                total_inits,
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+            )
 
-        if not daily_pl:
-            logging.error("No pressure-level datasets retrieved for control run")
-            return False
-
-        ds_pressure_all = xr.concat(daily_pl, dim="init_time").sortby("init_time")
-        ds_pressure_all = sanitize_dataset_attrs(ds_pressure_all)
-        if os.path.exists(output_file):
-            import shutil
-
-            shutil.rmtree(output_file, ignore_errors=True)
-        ds_pressure_all.to_zarr(output_file, consolidated=True, zarr_format=2, mode="w")
-
-        surface_sets: list[xr.Dataset] = []
-        for group in date_groups:
-            hours_token = "/".join(group["hours"])
             request_sfc = {
                 "area": area,
                 "class": "od",
-                "date": group["date"],
+                "date": date_token,
                 "expver": "1",
                 "grid": grid,
                 "levtype": "sfc",
                 "param": single_level_params,
-                "step": "0/1" if debug_small else f"{interval}/to/{max_lead_hours}/by/{interval}",
+                "step": request_step,
                 "stream": "enfo",
                 "expect": "any",
-                "time": hours_token,
+                "time": hour_token,
                 "type": "cf",
             }
+            logging.info(
+                "Submitting control surface request for init %s",
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+            )
             ds_single = earthkit.data.from_source("mars", request_sfc, lazily=True)
             ds_single = (
                 ds_single.to_xarray(chunks=chunks_surface)
@@ -922,29 +936,41 @@ def download_ifs_control(
             ds_single = rename_and_enrich(
                 ds_single,
                 has_ensemble=False,
-                init_times=group["datetimes"],
+                init_times=[init_dt],
                 add_dummy_ensemble=True,
             )
             ds_single = cast_float32(ds_single)
             ds_single = normalize_longitudes(ds_single)
             ds_single = normalize_latitudes(ds_single)
             if debug_small:
-                log_ds_summary(f"control.surface.{group['date']}", ds_single)
-            surface_sets.append(ds_single)
+                log_ds_summary(f"control.surface.{init_dt:%Y%m%d%H}", ds_single)
+            ds_single = normalize_time_encodings(ds_single)
+            logging.info(
+                "Control surface complete %d/%d for init %s",
+                idx,
+                total_inits,
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+            )
 
-        if surface_sets:
-            ds_surface = xr.concat(surface_sets, dim="init_time").sortby("init_time")
-            ds_surface = normalize_time_encodings(ds_surface)
-            ds_surface = normalize_longitudes(ds_surface)
-            ds_surface = normalize_latitudes(ds_surface)
-            ds_surface_sanitized = sanitize_dataset_attrs(
-                ds_surface.drop_vars(["z"], errors="ignore")
+            ds_to_write = xr.merge([ds_combined, ds_single], compat="no_conflicts")
+            append_init_to_store(output_file, ds_to_write)
+            existing_init_times.add(init_key)
+            logging.info(
+                "Persisted control init %s (%d/%d) to %s",
+                init_dt.strftime("%Y-%m-%d %H:%M"),
+                idx,
+                total_inits,
+                output_file,
             )
-            ds_surface_sanitized.to_zarr(output_file, consolidated=True, zarr_format=2, mode="a")
-        else:
-            logging.warning(
-                "No surface datasets retrieved for control run; continuing without surface fields"
+
+        missing_inits = requested_init_set.difference(existing_init_times)
+        if missing_inits:
+            logging.error(
+                "Control download finished but %d init_times are still missing: %s",
+                len(missing_inits),
+                sorted(str(val) for val in list(missing_inits))[:5],
             )
+            return False
 
         logging.info(f"Successfully downloaded control data to {output_file}")
         return True
@@ -1039,7 +1065,14 @@ def main():
     logging.info("Total init_times to fetch: %d (interval %dh)", len(init_times), args.interval)
 
     # Choose fields for this run
-    fields = get_debug_fields() if args.debug_small else ESFM_FIELDS
+    if args.debug_small:
+        fields = get_debug_fields()
+    else:
+        try:
+            fields = load_fields_from_env()
+        except ValueError as exc:
+            logging.error("Invalid field configuration: %s", exc)
+            return 1
 
     success = True
 

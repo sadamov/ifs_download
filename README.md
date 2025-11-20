@@ -18,6 +18,7 @@ Edit `config.env` to set your output path, date ranges, and options. Keys (see f
 - ENSEMBLE_MARS_CHUNK_SIZE: members per MARS request (1-50, default 50 to minimize catalogue calls)
 - DEBUG_SMALL: `0` or `1` (1 uses a tiny subset for fast checks)
 - MODEL_NAME: model directory written under each date
+- IFS_GRID / IFS_AREA / IFS_PRESSURE_LEVELS / IFS_PRESSURE_LEVEL_PARAMS / IFS_SINGLE_LEVEL_PARAMS: comma-separated geometry and parameter lists for the requests
 - ECCODES_DIR: optional path to ecCodes install (or leave empty for auto-detect)
 - DATE_RANGES: comma-separated list of `start|end` pairs
 
@@ -188,17 +189,24 @@ pip install earthkit-data xarray zarr dask netcdf4
 - Access to a SLURM batch system
 - Network access to ECMWF/MARS
 
-## Defaults (ESFM)
+## Field defaults (ESFM)
 
-```python
-{
-   "grid": [0.25, 0.25],            # 0.25° resolution
-   "area": [90, -180, -90, 180],    # Global coverage
-   "pressure_levels": [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50],
-   "pressure_level_params": ["u", "v", "t", "q", "z"],  # Wind, temp, humidity, geopotential
-   "single_level_params": ["2t", "10u", "10v", "msl", "tp", "z"]  # Surface variables
-}
+The Python downloader now reads request geometry and parameter selections from `config.env`:
+
+```dotenv
+# 0.25° grid at global coverage
+IFS_GRID=0.25,0.25
+IFS_AREA=90,-180,-90,180
+
+# Pressure-level setup (ECMWF ENFO PL set omits 600 hPa)
+IFS_PRESSURE_LEVELS=1000,925,850,700,500,400,300,250,200,150,100,50
+IFS_PRESSURE_LEVEL_PARAMS=u,v,t,q,z
+
+# Surface variables (geopotential removed to avoid duplicate fields)
+IFS_SINGLE_LEVEL_PARAMS=2t,10u,10v,msl,tp
 ```
+
+Edit these entries to tailor the downloads (e.g., set a smaller area or drop certain variables). All values are comma-separated; whitespace is ignored.
 
 ## Troubleshooting
 
