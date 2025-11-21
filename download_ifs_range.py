@@ -9,14 +9,13 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, Mapping, Sequence, Set
+from typing import Any, Callable, Mapping, Sequence, Set
 
 import earthkit.data
 import numpy as np
 import xarray as xr
 from earthkit.data import settings
 
-# Model name can be overridden via environment variable MODEL_NAME (default: esfm)
 MODEL_NAME = os.getenv("MODEL_NAME", "esfm")
 
 
@@ -103,11 +102,6 @@ def generate_init_times(
     return inits
 
 
-def to_datetime64(values: Iterable[datetime]) -> np.ndarray:
-    """Convert iterable of datetimes to numpy datetime64[ns] array."""
-    return np.array([np.datetime64(dt, "ns") for dt in values], dtype="datetime64[ns]")
-
-
 def dedupe_sorted_datetimes(values: Sequence[datetime]) -> list[datetime]:
     """Return sorted datetimes with duplicates removed while preserving order."""
     ordered = sorted(values)
@@ -116,35 +110,6 @@ def dedupe_sorted_datetimes(values: Sequence[datetime]) -> list[datetime]:
         if not unique or dt != unique[-1]:
             unique.append(dt)
     return unique
-
-
-def order_init_time(ds: xr.Dataset, target_values: np.ndarray) -> xr.Dataset:
-    """Reorder/select init_time coordinate to match the provided values."""
-    if "init_time" not in ds.coords:
-        raise ValueError("Dataset missing init_time coordinate after conversion")
-    available = ds["init_time"].values.astype("datetime64[ns]")
-    indices: list[int] = []
-    missing: list[np.datetime64] = []
-    for val in target_values:
-        matches = np.where(available == val)[0]
-        if matches.size == 0:
-            missing.append(val)
-        else:
-            indices.append(int(matches[0]))
-    if missing:
-        raise ValueError(f"Missing init_time values in dataset: {missing}")
-    ds = ds.isel(init_time=indices)
-    ds = ds.assign_coords(init_time=target_values)
-    return ds
-
-
-def init_coord_matches(coord: xr.DataArray, init_times: Sequence[datetime]) -> bool:
-    """Check whether coord covers the provided init_times (ignoring order)."""
-    if coord.size == 0:
-        return False
-    existing = np.sort(coord.astype("datetime64[ns]").values)
-    target = np.sort(to_datetime64(init_times))
-    return existing.shape == target.shape and np.array_equal(existing, target)
 
 
 def setup_logging(log_file=None):
@@ -240,12 +205,41 @@ def sanitize_dataset_attrs(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def clear_variable_encodings(ds: xr.Dataset) -> xr.Dataset:
+    """Strip encoding metadata so that coordinates persist as raw values."""
+
+    ds.encoding = {}
+    for name in ds.variables:
+        var = ds[name]
+        if var.encoding:
+            var.encoding = {}
+    return ds
+
+
 def append_init_to_store(output_file: str, ds: xr.Dataset) -> None:
     """Persist a single-init dataset by appending along init_time."""
 
     exists = os.path.exists(output_file)
     mode = "a" if exists else "w"
-    sanitized = sanitize_dataset_attrs(ds)
+    prepared = ds
+    if "init_time" in prepared.coords:
+        coord = prepared["init_time"]
+        if not np.issubdtype(coord.dtype, np.datetime64):
+            prepared = prepared.assign_coords(
+                init_time=(coord.dims, coord.values.astype("datetime64[ns]"))
+            )
+    sanitized = sanitize_dataset_attrs(prepared)
+    sanitized = clear_variable_encodings(sanitized)
+    if "init_time" in sanitized.coords:
+        sanitized["init_time"].attrs = {}
+        sanitized["init_time"].encoding = {
+            "units": "nanoseconds since 1970-01-01 00:00:00",
+            "calendar": "proleptic_gregorian",
+        }
+        logging.info(
+            "Writing init_time values: %s",
+            sanitized["init_time"].values,
+        )
     write_kwargs = {
         "consolidated": True,
         "zarr_format": 2,
@@ -284,32 +278,44 @@ def log_ds_summary(name: str, ds: xr.Dataset):
         logging.info(f"{name} summary: dims={sizes}, coords={coords}, data_vars={data_vars}")
         logging.info(f"{name} chunks: {chunks}")
         logging.info(f"{name} attr keys: {attr_keys}")
+        for key in ("time", "step", "init_time", "lead_time"):
+            if key in ds.variables:
+                var = ds[key]
+                try:
+                    sample = var.values.flat[0] if var.values.size else None
+                except Exception:
+                    sample = None
+                logging.info("%s %s dtype=%s first_sample=%s", name, key, var.dtype, sample)
     except Exception as e:
         logging.warning(f"Failed to log dataset summary for {name}: {e}")
 
 
-def rename_and_enrich(
-    ds: xr.Dataset,
-    *,
-    has_ensemble: bool,
-    init_times: Sequence[datetime] | None = None,
-    add_dummy_ensemble: bool = False,
-) -> xr.Dataset:
+def _datetime_to_np64(dt: datetime) -> np.datetime64:
+    """Convert naive datetime to numpy datetime64[ns] using ISO formatting."""
+    return np.datetime64(dt.strftime("%Y-%m-%dT%H:%M:%S"), "s").astype("datetime64[ns]")
+
+
+def rename_and_enrich(ds: xr.Dataset, *, init_dt: datetime | None = None) -> xr.Dataset:
     """Rename dims/coords to desired schema and add init_time dimension/coord.
 
-    - number -> ensemble (if present and has_ensemble=True)
+    - number -> ensemble (if present)
     - step -> lead_time (if present)
-    - init_time: always added from init_dt; drop any existing 'time' coord
+    - time -> init_time (if present, otherwise fall back to init_dt)
     - Rename variables to full descriptive names
-    - Optionally add an ensemble dimension of size 1 for control data
+    - Always ensure an ensemble dimension exists (control data gets size 1)
     """
     rename_map = {}
-    if has_ensemble and ("number" in ds.dims or "number" in ds.coords):
+    if "number" in ds.dims or "number" in ds.coords:
         rename_map["number"] = "ensemble"
     if "step" in ds.dims or "step" in ds.coords:
         rename_map["step"] = "lead_time"
+    if "time" in ds.dims or "time" in ds.coords:
+        rename_map["time"] = "init_time"
     if rename_map:
         ds = ds.rename(rename_map)
+
+    if init_dt is not None and "init_time" not in ds.coords:
+        ds = ds.assign_coords(init_time=np.array([_datetime_to_np64(init_dt)]))
 
     # Rename variables to full descriptive names
     var_rename_map = {
@@ -328,32 +334,18 @@ def rename_and_enrich(
     if var_rename_dict:
         ds = ds.rename(var_rename_dict)
 
-    ds = ds.drop_vars(["time"], errors="ignore")
-    if "init_time" in ds.coords and "init_time" not in ds.dims:
-        ds = ds.drop_vars(["init_time"], errors="ignore")
+    created_dummy_ensemble = False
+    if "ensemble" not in ds.dims:
+        ds = ds.expand_dims({"ensemble": np.array([0], dtype="int32")})
+        created_dummy_ensemble = True
+    ds = ds.assign_coords(ensemble=("ensemble", ds["ensemble"].values.astype("int32")))
 
-    ts = to_datetime64(init_times) if init_times else None
-    if "init_time" not in ds.dims:
-        if ts is None:
-            raise ValueError("init_times must be provided when dataset lacks init_time coord")
-        ds = ds.expand_dims(init_time=ts)
-    if ts is not None:
-        if ds.sizes.get("init_time", len(ts)) != len(ts):
-            raise ValueError("init_time dimension mismatch")
-        ds = ds.assign_coords(init_time=("init_time", ts))
-    elif "init_time" in ds.dims:
-        ds = ds.assign_coords(init_time=ds["init_time"].astype("datetime64[ns]"))
-    else:
-        raise ValueError("init_times must be provided when dataset lacks init_time dim")
-
-    ds["init_time"] = ds["init_time"].astype("datetime64[ns]")
-    ds["init_time"].attrs = {}
-
-    if add_dummy_ensemble and "ensemble" not in ds.dims:
-        ds = ds.expand_dims(ensemble=[0])
-        # Keep ensemble leading for consistency with true ensembles
+    if created_dummy_ensemble:
         ordered_dims = ["ensemble"] + [dim for dim in ds.dims if dim != "ensemble"]
         ds = ds.transpose(*ordered_dims)
+
+    # Drop any lingering number coordinate after renaming/expansion
+    ds = ds.drop_vars("number", errors="ignore")
 
     return ds
 
@@ -417,57 +409,6 @@ def normalize_latitudes(ds: xr.Dataset, *, descending: bool = True) -> xr.Datase
     if np.all(diffs >= 0):
         return ds
     return ds.sortby("latitude", ascending=True)
-
-
-def normalize_time_encodings(ds: xr.Dataset) -> xr.Dataset:
-    """Normalize time coordinates for robust Zarr round-trips.
-
-    - init_time: enforce dtype datetime64[ns] and clear CF hints (units/calendar).
-    - lead_time: enforce dtype timedelta64[ns]. If it's numeric, interpret as hours.
-    """
-    ds = ds.copy()
-
-    # init_time: ensure datetime64[ns] and clear CF metadata that might trigger CF-decoding
-    if "init_time" in ds.coords:
-        try:
-            ds["init_time"] = ds["init_time"].astype("datetime64[ns]")
-            # Set dtype explicitly in encoding to prevent xarray from converting to int64
-            ds["init_time"].encoding = {"dtype": "datetime64[ns]"}
-            for k in ("units", "calendar"):
-                if k in ds["init_time"].attrs:
-                    ds["init_time"].attrs.pop(k, None)
-        except Exception:
-            pass
-
-    # lead_time: ensure timedelta64[ns]
-    if "lead_time" in ds.coords:
-        lt = ds["lead_time"]
-        try:
-            raw = lt.values
-            if np.issubdtype(raw.dtype, np.timedelta64):
-                ints = raw.astype("int64")
-                # Genuine ns values are O(1e14); smaller numbers mean the array still
-                # stores lead times as bare hours, so rescale explicitly.
-                if ints.size and np.nanmax(np.abs(ints)) < 10**10:
-                    td = (ints * np.timedelta64(1, "h")).astype("timedelta64[ns]")
-                else:
-                    td = raw.astype("timedelta64[ns]")
-            else:
-                # Treat numeric lead_time as hours by convention (IFS step is in hours)
-                ints = raw.astype("int64")
-                td = (ints * np.timedelta64(1, "h")).astype("timedelta64[ns]")
-            ds = ds.assign_coords(lead_time=("lead_time", td))
-            # Clear any encoding that might prompt CF conversions back to integers
-            # Set dtype explicitly in encoding to prevent xarray from converting to int64
-            ds["lead_time"].encoding = {"dtype": "timedelta64[ns]"}
-            # Also drop confusing attrs like units so xarray doesn't attempt CF decode
-            for k in ("units", "calendar"):
-                if k in ds["lead_time"].attrs:
-                    ds["lead_time"].attrs.pop(k, None)
-        except Exception:
-            pass
-
-    return ds
 
 
 def download_ifs_ensemble(
@@ -632,16 +573,16 @@ def download_ifs_ensemble(
                 else:
                     ds_combined = ds_normal
 
+                log_ds_summary(f"ensemble.raw.pl.{init_dt:%Y%m%d%H}.{step_expr}", ds_combined)
+
                 ds_combined = ds_combined.chunk(chunks_pl).drop_vars("valid_time", errors="ignore")
                 ds_combined = rename_and_enrich(
                     ds_combined,
-                    has_ensemble=True,
-                    init_times=[init_dt],
+                    init_dt=init_dt,
                 )
                 ds_combined = cast_float32(ds_combined)
                 ds_combined = normalize_longitudes(ds_combined)
                 ds_combined = normalize_latitudes(ds_combined)
-                ds_combined = normalize_time_encodings(ds_combined)
                 if debug_small:
                     log_ds_summary(f"ensemble.pl.{init_dt:%Y%m%d%H}.{step_expr}", ds_combined)
                 init_step_sets.append(ds_combined)
@@ -690,10 +631,10 @@ def download_ifs_ensemble(
                     .drop_vars("valid_time", errors="ignore")
                     .chunk(chunks_surface)
                 )
+                log_ds_summary(f"ensemble.raw.sfc.{init_dt:%Y%m%d%H}.{step_expr}", ds_single)
                 ds_single = rename_and_enrich(
                     ds_single,
-                    has_ensemble=True,
-                    init_times=[init_dt],
+                    init_dt=init_dt,
                 )
                 ds_single = cast_float32(ds_single)
                 ds_single = normalize_longitudes(ds_single)
@@ -709,7 +650,6 @@ def download_ifs_ensemble(
                     if len(init_surface_sets) > 1
                     else init_surface_sets[0]
                 )
-                ds_surface = normalize_time_encodings(ds_surface)
                 ds_surface = normalize_longitudes(ds_surface)
                 ds_surface = normalize_latitudes(ds_surface)
                 logging.info(
@@ -729,6 +669,12 @@ def download_ifs_ensemble(
                 if ds_surface is not None
                 else init_pl
             )
+            target_init = np.array([_datetime_to_np64(init_dt)], dtype="datetime64[ns]")
+            if "init_time" not in ds_to_write.dims:
+                ds_to_write = ds_to_write.expand_dims("init_time")
+            ds_to_write = ds_to_write.assign_coords(init_time=("init_time", target_init))
+            ds_to_write["init_time"].attrs = {}
+            ds_to_write["init_time"].encoding = {}
             append_init_to_store(output_file, ds_to_write)
             existing_init_times.add(init_key)
             logging.info(
@@ -890,16 +836,14 @@ def download_ifs_control(
                 ds_combined = ds_normal
 
             ds_combined = ds_combined.chunk(chunks_pl).drop_vars("valid_time", errors="ignore")
+            log_ds_summary(f"control.raw.pl.{init_dt:%Y%m%d%H}", ds_combined)
             ds_combined = rename_and_enrich(
                 ds_combined,
-                has_ensemble=False,
-                init_times=[init_dt],
-                add_dummy_ensemble=True,
+                init_dt=init_dt,
             )
             ds_combined = cast_float32(ds_combined)
             ds_combined = normalize_longitudes(ds_combined)
             ds_combined = normalize_latitudes(ds_combined)
-            ds_combined = normalize_time_encodings(ds_combined)
             if debug_small:
                 log_ds_summary(f"control.pl.{init_dt:%Y%m%d%H}", ds_combined)
             logging.info(
@@ -933,18 +877,16 @@ def download_ifs_control(
                 .drop_vars("valid_time", errors="ignore")
                 .chunk(chunks_surface)
             )
+            log_ds_summary(f"control.raw.sfc.{init_dt:%Y%m%d%H}", ds_single)
             ds_single = rename_and_enrich(
                 ds_single,
-                has_ensemble=False,
-                init_times=[init_dt],
-                add_dummy_ensemble=True,
+                init_dt=init_dt,
             )
             ds_single = cast_float32(ds_single)
             ds_single = normalize_longitudes(ds_single)
             ds_single = normalize_latitudes(ds_single)
             if debug_small:
                 log_ds_summary(f"control.surface.{init_dt:%Y%m%d%H}", ds_single)
-            ds_single = normalize_time_encodings(ds_single)
             logging.info(
                 "Control surface complete %d/%d for init %s",
                 idx,
@@ -953,6 +895,12 @@ def download_ifs_control(
             )
 
             ds_to_write = xr.merge([ds_combined, ds_single], compat="no_conflicts")
+            target_init = np.array([_datetime_to_np64(init_dt)], dtype="datetime64[ns]")
+            if "init_time" not in ds_to_write.dims:
+                ds_to_write = ds_to_write.expand_dims("init_time")
+            ds_to_write = ds_to_write.assign_coords(init_time=("init_time", target_init))
+            ds_to_write["init_time"].attrs = {}
+            ds_to_write["init_time"].encoding = {}
             append_init_to_store(output_file, ds_to_write)
             existing_init_times.add(init_key)
             logging.info(
