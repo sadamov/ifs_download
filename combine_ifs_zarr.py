@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Combine per-date IFS Zarr archives into consolidated archives (ensemble and control).
-- Ensures Zarr v2 metadata on write
-- Combines across the 'time' dimension; if missing, injects a single 'time' coord
+Combine per-date IFS Zarr archives into consolidated, init_time-sorted outputs.
 
 Usage:
-  python combine_ifs_zarr.py <output_dir> [--model esfm] [--log-file logs/combine_ifs.log]
+    python combine_ifs_zarr.py <output_dir> [--model esfm] [--log-file logs/combine_ifs.log]
 
-This script finds archives at: <output_dir>/<YYYYMMDDHHMM>/<model>/(ifs_ens.zarr|ifs_control.zarr)
-and writes combined archives to:
-    <output_dir>/<model>/ifs_ens_combined.zarr
-    <output_dir>/<model>/ifs_control_combined.zarr
+The script expects archives at <output_dir>/<YYYYMMDDHHMM>/<model>/(ifs_ens.zarr|ifs_control.zarr)
+and writes the combined outputs to:
+        <output_dir>/<model>/ifs_ens_combined.zarr
+        <output_dir>/<model>/ifs_control_combined.zarr
 """
 
 import argparse
@@ -18,9 +16,7 @@ import glob
 import logging
 import os
 from datetime import datetime
-from typing import List, Tuple
 
-import numpy as np
 import xarray as xr
 
 
@@ -28,7 +24,9 @@ def setup_logging(log_file: str | None) -> None:
     level = logging.INFO
     fmt = "%(asctime)s - %(levelname)s - %(message)s"
     if log_file:
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
             level=level,
             format=fmt,
@@ -38,139 +36,37 @@ def setup_logging(log_file: str | None) -> None:
         logging.basicConfig(level=level, format=fmt)
 
 
-def find_archives(output_dir: str, model: str, name: str) -> List[Tuple[datetime, str]]:
+def find_archives(output_dir: str, model: str, name: str) -> list[tuple[datetime, str]]:
     pattern = os.path.join(output_dir, "20*", model, name)
-    paths = glob.glob(pattern)
-    items: List[Tuple[datetime, str]] = []
-    for p in paths:
-        # Extract the date directory name
+    items: list[tuple[datetime, str]] = []
+    for path in glob.glob(pattern):
         try:
-            date_dir = os.path.basename(os.path.dirname(p))  # model dir
-            date_dir = os.path.basename(os.path.dirname(os.path.dirname(p)))  # date dir
+            date_dir = os.path.basename(os.path.dirname(os.path.dirname(path)))
         except Exception:
             continue
         try:
             dt = datetime.strptime(date_dir, "%Y%m%d%H%M")
         except Exception:
-            logging.warning(f"Skipping path with non-conforming date dir: {p}")
+            logging.warning("Skipping path with non-conforming date dir: %s", path)
             continue
-        items.append((dt, p))
+        items.append((dt, path))
     items.sort(key=lambda t: t[0])
     return items
 
 
-def rename_variables(ds: xr.Dataset) -> xr.Dataset:
-    """Rename short variable names to full descriptive names."""
-
-    # Mapping from short names to full descriptive names
-    var_rename_map = {
-        "10u": "10m_u_component_of_wind",
-        "10v": "10m_v_component_of_wind",
-        "2t": "2m_temperature",
-        "msl": "mean_sea_level_pressure",
-        "tp": "total_precipitation",
-        "z": "geopotential",
-        "q": "specific_humidity",
-        "t": "temperature",
-        "u": "u_component_of_wind",
-        "v": "v_component_of_wind",
-    }
-
-    # Only rename variables that exist in the dataset
-    rename_dict = {old: new for old, new in var_rename_map.items() if old in ds.data_vars}
-
-    if rename_dict:
-        logging.info(f"Renaming variables: {rename_dict}")
-        ds = ds.rename(rename_dict)
-
-    return ds
-
-
-def open_and_tag(archive_path: str, date_tag: datetime) -> xr.Dataset:
-    """Open a zarr archive and add the date tag."""
-    logging.info(f"Opened {archive_path}")
-
-    # Try opening with decode_times=True first, fall back to False if it fails
-    try:
-        ds = xr.open_zarr(archive_path, consolidated=True)
-    except Exception as e:
-        if "unable to decode time units" in str(e):
-            logging.info("  Falling back to decode_times=False due to time decoding error")
-            ds = xr.open_zarr(archive_path, consolidated=True, decode_times=False)
-        else:
-            raise
-
-    # Check time coordinate types and convert if needed
-    if "init_time" in ds.coords:
-        logging.info(f"  init_time dtype before: {ds.init_time.dtype}")
-        if ds.init_time.dtype == "int64":
-            # The int64 value is corrupted (NaN), reconstruct from folder date
-            # date_tag is the datetime parsed from the folder name (YYYYMMDDHHMM)
-            init_time_value = np.datetime64(date_tag, "ns")
-            ds = ds.assign_coords(init_time=np.array([init_time_value]))
-            logging.info(f"  Reconstructed init_time from folder date: {init_time_value}")
-            logging.info(f"  init_time dtype after: {ds.init_time.dtype}")
-        else:
-            logging.info(f"  init_time dtype after: {ds.init_time.dtype}")
-
-    if "lead_time" in ds.coords:
-        logging.info(f"  lead_time dtype before: {ds.lead_time.dtype}")
-        if ds.lead_time.dtype == "int64":
-            # Convert lead_time from int64 (hours) to timedelta64[ns]
-            # The attrs say units are 'hours', so interpret as hours
-            ds = ds.assign_coords(
-                lead_time=(ds.lead_time.values * np.timedelta64(1, "h")).astype("timedelta64[ns]")
-            )
-            logging.info(f"  lead_time dtype after: {ds.lead_time.dtype}")
-        else:
-            logging.info(f"  lead_time dtype after: {ds.lead_time.dtype}")
-
-    # Rename variables to full descriptive names
-    ds = rename_variables(ds)
-
-    return ds
-
-
-def _filter_lead_time(ds: xr.Dataset) -> xr.Dataset:
-    """Ensure lead_time runs from +6h to +168h inclusive in 6-hourly steps.
-
-    Drops any 0h and 1h steps (or any non-multiples of 6h) if present.
-    If lead_time coord is missing, returns ds unchanged.
-    """
-    if "lead_time" not in ds.coords:
-        return ds
-    import os as _os
-
-    lt_ns = ds["lead_time"].astype("timedelta64[ns]").astype("int64")
-    hours = (lt_ns // 3_600_000_000_000).values
-    max_hours = int(_os.getenv("MAX_LEAD_TIME_HOURS", "168"))
-    interval = int(_os.getenv("INTERVAL", "6"))
-    # snap to interval
-    max_hours = (max_hours // interval) * interval
-    mask = (hours >= interval) & (hours <= max_hours) & (hours % interval == 0)
-    if (~mask).any():
-        idx = np.nonzero(mask)[0]
-        ds = ds.isel(lead_time=idx) if idx.size > 0 else ds.isel(lead_time=slice(0, 0))
-    ds = ds.assign_coords(lead_time=ds["lead_time"].astype("timedelta64[ns]"))
-    ds["lead_time"].encoding = {"dtype": "timedelta64[ns]"}
-    return ds
-
-
-def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: str) -> bool:
+def combine_and_write(items: list[tuple[datetime, str]], out_path: str, label: str) -> bool:
     if not items:
         logging.info(f"No {label} archives found to combine.")
         return False
     logging.info(f"Combining {len(items)} {label} archives into {out_path}")
-    dsets: List[xr.Dataset] = []
-    for dt, p in items:
+    dsets: list[xr.Dataset] = []
+    for _, path in items:
         try:
-            ds = open_and_tag(p, dt)
-            if label == "control" and "ensemble" not in ds.dims:
-                ds = ds.expand_dims(ensemble=[0])
+            ds = xr.open_zarr(path, consolidated=True)
             dsets.append(ds)
-            logging.info(f"  included {label}: {p}")
+            logging.info("  included %s: %s", label, path)
         except Exception as e:
-            logging.error(f"Failed to open {p}: {e}")
+            logging.error("Failed to open %s: %s", path, e)
     if not dsets:
         logging.warning(f"No readable {label} datasets; skipping write.")
         return False
@@ -186,13 +82,6 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         )
         combined = combined.sortby("init_time")
 
-        # Enforce lead_time policy: keep only +6h..+168h inclusive in 6h steps
-        combined = _filter_lead_time(combined)
-
-        # Rechunk to ensure proper alignment for Zarr writing
-        # Determine if this is ensemble data (has 'ensemble' dimension) or control data
-        has_ensemble = "ensemble" in combined.dims
-
         # Build chunking dict based on available dimensions
         chunk_dict = {
             "init_time": 1,
@@ -200,10 +89,6 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
             "latitude": -1,
             "longitude": -1,
         }
-
-        if has_ensemble:
-            # Chunk ensemble dimension as full size (not by 10)
-            chunk_dict["ensemble"] = -1
 
         # Only add 'level' if it exists in dimensions
         if "level" in combined.dims:
@@ -248,18 +133,14 @@ def combine_and_write(items: List[Tuple[datetime, str]], out_path: str, label: s
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         if os.path.exists(out_path):
             logging.info(f"Overwriting existing combined archive: {out_path}")
-            # Clean up to avoid schema conflicts
             import shutil
 
             shutil.rmtree(out_path)
         combined.to_zarr(out_path, mode="w", consolidated=True, zarr_format=2)
         logging.info(f"Wrote combined archive: {out_path}")
         return True
-    except Exception as e:
-        logging.error(f"Failed to write combined {label} archive: {e}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception:
+        logging.exception(f"Failed to write combined {label} archive")
         return False
 
 
