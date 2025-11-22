@@ -236,7 +236,7 @@ def append_init_to_store(output_file: str, ds: xr.Dataset) -> None:
             "units": "nanoseconds since 1970-01-01 00:00:00",
             "calendar": "proleptic_gregorian",
         }
-        logging.info(
+        logging.debug(
             "Writing init_time values: %s",
             sanitized["init_time"].values,
         )
@@ -275,9 +275,9 @@ def log_ds_summary(name: str, ds: xr.Dataset):
         data_vars = list(ds.data_vars)
         chunks = getattr(ds, "chunks", None)
         attr_keys = list(ds.attrs.keys()) if ds.attrs else []
-        logging.info(f"{name} summary: dims={sizes}, coords={coords}, data_vars={data_vars}")
-        logging.info(f"{name} chunks: {chunks}")
-        logging.info(f"{name} attr keys: {attr_keys}")
+        logging.debug(f"{name} summary: dims={sizes}, coords={coords}, data_vars={data_vars}")
+        logging.debug(f"{name} chunks: {chunks}")
+        logging.debug(f"{name} attr keys: {attr_keys}")
         for key in ("time", "step", "init_time", "lead_time"):
             if key in ds.variables:
                 var = ds[key]
@@ -285,7 +285,7 @@ def log_ds_summary(name: str, ds: xr.Dataset):
                     sample = var.values.flat[0] if var.values.size else None
                 except Exception:
                     sample = None
-                logging.info("%s %s dtype=%s first_sample=%s", name, key, var.dtype, sample)
+                logging.debug("%s %s dtype=%s first_sample=%s", name, key, var.dtype, sample)
     except Exception as e:
         logging.warning(f"Failed to log dataset summary for {name}: {e}")
 
@@ -526,7 +526,7 @@ def download_ifs_ensemble(
             init_key = np.datetime64(init_dt, "ns")
             if init_key in existing_init_times:
                 logging.info(
-                    "Ensemble init %s already persisted; skipping (%d/%d).",
+                    "Data is already stored on disk as zarr for ensemble init %s (%d/%d).",
                     init_dt.strftime("%Y-%m-%d %H:%M"),
                     idx,
                     total_inits,
@@ -555,7 +555,7 @@ def download_ifs_ensemble(
                     "type": "pf",
                 }
 
-                logging.info(
+                logging.debug(
                     "Submitting ensemble pressure request for init %s step %s",
                     init_dt.strftime("%Y-%m-%d %H:%M"),
                     step_expr,
@@ -596,7 +596,7 @@ def download_ifs_ensemble(
                 if len(init_step_sets) > 1
                 else init_step_sets[0]
             )
-            logging.info(
+            logging.debug(
                 "Ensemble pressure complete %d/%d for init %s",
                 idx,
                 total_inits,
@@ -620,7 +620,7 @@ def download_ifs_ensemble(
                     "time": hour_token,
                     "type": "pf",
                 }
-                logging.info(
+                logging.debug(
                     "Submitting ensemble surface request for init %s step %s",
                     init_dt.strftime("%Y-%m-%d %H:%M"),
                     step_expr,
@@ -652,7 +652,7 @@ def download_ifs_ensemble(
                 )
                 ds_surface = normalize_longitudes(ds_surface)
                 ds_surface = normalize_latitudes(ds_surface)
-                logging.info(
+                logging.debug(
                     "Ensemble surface complete %d/%d for init %s",
                     idx,
                     total_inits,
@@ -678,7 +678,7 @@ def download_ifs_ensemble(
             append_init_to_store(output_file, ds_to_write)
             existing_init_times.add(init_key)
             logging.info(
-                "Persisted ensemble init %s (%d/%d) to %s",
+                "Data was downloaded from Mars web api or ekd cache for ensemble init %s (%d/%d) and persisted to %s",
                 init_dt.strftime("%Y-%m-%d %H:%M"),
                 idx,
                 total_inits,
@@ -793,7 +793,7 @@ def download_ifs_control(
             init_key = np.datetime64(init_dt, "ns")
             if init_key in existing_init_times:
                 logging.info(
-                    "Control init %s already persisted; skipping (%d/%d).",
+                    "Data is already stored on disk as zarr for control init %s (%d/%d).",
                     init_dt.strftime("%Y-%m-%d %H:%M"),
                     idx,
                     total_inits,
@@ -818,7 +818,7 @@ def download_ifs_control(
                 "type": "cf",
             }
 
-            logging.info(
+            logging.debug(
                 "Submitting control pressure request for init %s",
                 init_dt.strftime("%Y-%m-%d %H:%M"),
             )
@@ -846,7 +846,7 @@ def download_ifs_control(
             ds_combined = normalize_latitudes(ds_combined)
             if debug_small:
                 log_ds_summary(f"control.pl.{init_dt:%Y%m%d%H}", ds_combined)
-            logging.info(
+            logging.debug(
                 "Control pressure complete %d/%d for init %s",
                 idx,
                 total_inits,
@@ -867,7 +867,7 @@ def download_ifs_control(
                 "time": hour_token,
                 "type": "cf",
             }
-            logging.info(
+            logging.debug(
                 "Submitting control surface request for init %s",
                 init_dt.strftime("%Y-%m-%d %H:%M"),
             )
@@ -887,7 +887,7 @@ def download_ifs_control(
             ds_single = normalize_latitudes(ds_single)
             if debug_small:
                 log_ds_summary(f"control.surface.{init_dt:%Y%m%d%H}", ds_single)
-            logging.info(
+            logging.debug(
                 "Control surface complete %d/%d for init %s",
                 idx,
                 total_inits,
@@ -904,7 +904,7 @@ def download_ifs_control(
             append_init_to_store(output_file, ds_to_write)
             existing_init_times.add(init_key)
             logging.info(
-                "Persisted control init %s (%d/%d) to %s",
+                "Data was downloaded from Mars web api or ekd cache for control init %s (%d/%d) and persisted to %s",
                 init_dt.strftime("%Y-%m-%d %H:%M"),
                 idx,
                 total_inits,
