@@ -334,6 +334,17 @@ def rename_and_enrich(ds: xr.Dataset, *, init_dt: datetime | None = None) -> xr.
     if var_rename_dict:
         ds = ds.rename(var_rename_dict)
 
+    # Ensure init_time is a proper dimension for all variables
+    if "init_time" in ds.coords:
+        if "init_time" in ds.dims:
+            # Check if any variable is missing it
+            if any("init_time" not in ds[v].dims for v in ds.data_vars):
+                val = ds["init_time"].values
+                ds = ds.drop_vars("init_time")
+                ds = ds.expand_dims(init_time=val)
+        else:
+            ds = ds.expand_dims("init_time")
+
     created_dummy_ensemble = False
     if "ensemble" not in ds.dims:
         ds = ds.expand_dims({"ensemble": np.array([0], dtype="int32")})

@@ -135,7 +135,10 @@ def combine_and_write(items: list[tuple[datetime, str]], out_path: str, label: s
             logging.info(f"Overwriting existing combined archive: {out_path}")
             import shutil
 
-            shutil.rmtree(out_path)
+            if os.path.islink(out_path):
+                os.unlink(out_path)
+            else:
+                shutil.rmtree(out_path)
         combined.to_zarr(out_path, mode="w", consolidated=True, zarr_format=2)
         logging.info(f"Wrote combined archive: {out_path}")
         return True
