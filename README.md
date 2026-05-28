@@ -79,9 +79,62 @@ Option B — recommended for long runs: queue a chain of jobs so the next starts
 
 - Download scripts: `download_ifs_range.py`, `combine_ifs_zarr.py`
 - SLURM scripts: `submit_ifs_download.sh`, `submit_ifs_download_chain.sh` (chained submissions)
+- IC-only sibling: `download_ic_perturbed.py` + `submit_ic_perturbed.sh` + `config_ic_perturbed.env` (see next section)
 - Validation: `validate_env_quick.py`, `validate_env_full.py`
 - Virtual environment: `.venv/` with required packages
 - Documentation: this `README.md`
+
+## IC-only ensemble download (`download_ic_perturbed.py`)
+
+Sibling script for downloading **only the IFS ENS perturbed analyses** (no
+forecast steps), intended as initial conditions for AI weather forecast models
+(Aurora, GraphCast, SFNO).
+
+What it downloads per (date, time):
+- **Upper-air on pressure levels (PL)**: 13 levels including 600 hPa --
+  `1000/925/850/700/600/500/400/300/250/200/150/100/50`. Params: T, U, V, Q, Z, W
+  (130/131/132/133/129/135).
+- **Surface (SFC)**: MSL, 2T, 10U, 10V, 100U, 100V, SP, TCWV
+  (151/167/165/166/246/247/134/137).
+
+MARS request: `class=od stream=enfo type=pf step=0 number=1..50`. `type=pf step=0`
+is the actual per-member perturbed analysis (the IC ready to feed a model) --
+simpler than `type=icp` which would require re-adding the control analysis per
+member.
+
+Init time grid: 8 weeks (Jan / Apr / Jul / Oct in 2023 and 2024), each extended
+6 hours backward to include the `T-6h` slot needed by Aurora / GraphCast (both
+autoregressive over [t-6h, t]). Generated in code as 28 6-hourly samples per
+week × 8 = **224 init times**.
+
+Output: one Zarr v3 sharded store at
+`/capstor/store/cscs/swissai/a122/IFS/ifs_analysis_perturbed_ic.zarr` (default).
+Dims: `(ensemble=50, init_time=224, [level=13 for 3D vars], latitude=721,
+longitude=1440)`. No `lead_time` dim (this is analysis, not forecast).
+Storage: ~3.8 TB.
+
+### Submit
+
+```bash
+# Paranoia check first: download ONE init's PL+SFC pair, print summary, no zarr write
+sbatch --account=a122 --partition=normal --time=4:00:00 --mem=128G -c 8 \
+    --output=logs/paranoia_%j.out --error=logs/paranoia_%j.err \
+    --wrap="cd $(pwd) && .venv/bin/python -u download_ic_perturbed.py --single-init"
+
+# Full 224-init download (idempotent: already-written init slices are skipped)
+sbatch submit_ic_perturbed.sh
+```
+
+### Environment gotchas the submit script handles
+
+- `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` -> certifi's bundle. CSCS compute
+  nodes do not ship a system CA bundle, so without this the ECMWF API HTTPS
+  connection fails certificate verification.
+- `TMPDIR` and `DASK_TEMPORARY_DIRECTORY` -> `/iopsstor/scratch/...`.
+  `/tmp` on Clariden compute nodes is too small (~94 GB) for any
+  meaningful download or dask spill.
+- `PYTHONUNBUFFERED=1` + `python -u` -> stdout flushes line-by-line so
+  the SLURM log file shows live progress from the ECMWF API client.
 
 ## Prerequisites
 
