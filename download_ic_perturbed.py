@@ -155,6 +155,16 @@ def init_zarr_store(
     shape_2d = (N_MEMBERS, n_init, LAT_N, LON_N)
     inner_2d = _make_inner_chunks(dims_2d, dict(zip(dims_2d, shape_2d)))
 
+    # SHARD BY init_time: one shard per init_time slot. Previously the encoding
+    # used shards=shape_3d -- a single shard per variable covering ALL inits --
+    # which interacted with the lazy dask region-write to only fire a subset of
+    # inner level chunks per write call (3-4 of 11 archived PL levels landed,
+    # different missing set per variable). Per-init shards guarantee each
+    # region-write of init_time=slice(i, i+1) touches exactly ONE shard and
+    # ALL inner chunks within that shard get computed + written.
+    shards_3d = (N_MEMBERS, 1, len(PL_LEVELS), LAT_N, LON_N)
+    shards_2d = (N_MEMBERS, 1, LAT_N, LON_N)
+
     # fill_value=NaN so unwritten cells read as NaN, not 0.0. Use dask.full
     # (lazy, no RAM cost) + compute=False -- np.empty leaks zeros into the
     # zarr at to_zarr time and fill_value in encoding is then ignored.
@@ -162,10 +172,10 @@ def init_zarr_store(
     encoding: dict[str, dict] = {}
     for short in PL_PARAMS.values():
         ds[short] = (dims_3d, da.full(shape_3d, nan32, dtype="float32", chunks=inner_3d))
-        encoding[short] = {"chunks": inner_3d, "shards": shape_3d, "fill_value": nan32}
+        encoding[short] = {"chunks": inner_3d, "shards": shards_3d, "fill_value": nan32}
     for short in SFC_PARAMS.values():
         ds[short] = (dims_2d, da.full(shape_2d, nan32, dtype="float32", chunks=inner_2d))
-        encoding[short] = {"chunks": inner_2d, "shards": shape_2d, "fill_value": nan32}
+        encoding[short] = {"chunks": inner_2d, "shards": shards_2d, "fill_value": nan32}
 
     # Coord encodings (small dims, default chunks)
     for c in ("ensemble", "init_time", "level", "latitude", "longitude"):
@@ -226,12 +236,12 @@ def already_written(out_path: Path, init_dt: datetime) -> bool:
         if len(init_idx) == 0:
             return False
         i = int(init_idx[0])
-        # Spot-check 3 var x 2 member x 2 level combinations. Reject NaN AND
-        # all-zero (defense against a stale template with default fill_value=0;
-        # no real T/U/Z field over the globe is exactly 0 everywhere).
+        # Spot-check at archived levels only (idx 0=1000, 5=500, 12=50).
+        # Indices 4 (=600) and 10 (=150) are NOT archived for type=pf step=0
+        # and stay NaN until the post-download log-p fill pass.
         for v in ("t", "u", "z"):
             for m in (0, 25):
-                for L in (0, 5):
+                for L in (0, 5, 12):
                     arr = ds[v].isel(init_time=i, ensemble=m, level=L).values
                     if not np.all(np.isfinite(arr)) or not np.any(arr):
                         return False
@@ -334,19 +344,42 @@ def fetch_and_write_one(
     pl_ds = _normalise(pl_ds, has_level=True)
     sfc_ds = _normalise(sfc_ds, has_level=False)
 
-    # Interpolate 150 + 600 hPa from neighbours (log-pressure linear)
-    pl_ds = _interpolate_missing_levels(pl_ds)
+    # Reindex PL to the FULL 13-level grid (PL_LEVELS), filling missing levels
+    # (150 + 600 hPa, not archived for type=pf step=0) with NaN. Previously we
+    # interpolated them inline here, but xr.concat + sortby broke dask chunk
+    # alignment with the sharded zarr template and only a subset of level
+    # chunks landed at write time. Reindex preserves dask chunk structure.
+    # The two NaN levels are filled in a one-shot post-download interpolation
+    # pass (see fill_interp_levels.py).
+    pl_ds = pl_ds.reindex(level=PL_LEVELS, fill_value=np.float32("nan"))
 
     # Combine & write
     merged = xr.merge([pl_ds, sfc_ds], compat="override")
     merged = merged.expand_dims({"init_time": [np.datetime64(init_dt, "ns")]})
 
-    # Drop dim-coord variables that don't share init_time -- xarray's region
-    # write rejects coords that don't intersect the region's dims. The template
-    # store already has these coord values written at init_zarr_store time.
-    drop = [c for c in ("ensemble", "level", "latitude", "longitude") if c in merged.variables]
+    # Drop EVERY coord variable that doesn't carry init_time in its dims --
+    # xarray's region write rejects any var without an init_time dim. The
+    # template store at init_zarr_store time already wrote correct values
+    # for these. The explicit list ['ensemble','level','latitude','longitude']
+    # was insufficient: fresh-MARS earthkit datasets sometimes carry extra
+    # metadata coords (e.g. heightAboveGround, paramId) that don't appear on
+    # the cache-hit path.
+    drop = [c for c in list(merged.coords) if "init_time" not in merged[c].dims]
+    logging.info("[%s] dropping non-init_time coords before write: %s", init_dt, drop)
     if drop:
         merged = merged.drop_vars(drop)
+
+    # EAGERLY MATERIALIZE before the region write. Per-init sharding did NOT
+    # cure the lazy region-write bug where dask drops a non-deterministic
+    # subset of level chunks during the write (paranoia runs got 4-5 of 11
+    # archived PL levels per variable, with the missing set varying per var
+    # and per run). Loading into RAM eliminates the dask scheduler from the
+    # write path -- the numpy -> zarr write is then a simple full-array
+    # store call with no chunk-graph optimization. Memory cost per init:
+    # 6 PL x 50 x 13 x 721 x 1440 x 4B (~16 GB) + 8 SFC x 50 x 721 x 1440 x
+    # 4B (~1.7 GB) ~= 18 GB, well within login-node RAM.
+    logging.info("[%s] loading merged dataset into memory (~18 GB)", init_dt)
+    merged = merged.load()
 
     logging.info("[%s] writing slice idx=%d to %s", init_dt, init_idx, out_path)
     merged.to_zarr(out_path, region={"init_time": slice(init_idx, init_idx + 1)},
