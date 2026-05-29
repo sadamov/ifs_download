@@ -176,18 +176,79 @@ def init_zarr_store(
 # ----------------------------------------------------------------------------
 # MARS request + write per init_time
 # ----------------------------------------------------------------------------
+# Levels NOT archived by MARS for type=pf step=0 on the PL stream (we asked
+# for 13, MARS returns 11). We interpolate them in log-pressure space after
+# download from the two adjacent archived levels.
+INTERP_LEVELS = {
+    150: (100, 200),   # f(150) = 0.42*f(100) + 0.58*f(200)
+    600: (500, 700),   # f(600) = 0.46*f(500) + 0.54*f(700)
+}
+
+# Earthkit cache root -- where MARS GRIBs land before earthkit reads them
+EARTHKIT_CACHE = Path("/capstor/store/cscs/swissai/a122/IFS/.earthkit-cache")
+
+
 def already_written(out_path: Path, init_dt: datetime) -> bool:
-    """Check if this init slice is non-NaN in the zarr -- means it was written."""
+    """Check if this init slice was fully written. Samples (member, level, var)
+    triples to catch partial writes that left NaN in some chunks."""
     try:
         ds = xr.open_zarr(out_path, consolidated=False)
         init_idx = np.where(ds.init_time.values == np.datetime64(init_dt, "ns"))[0]
         if len(init_idx) == 0:
             return False
-        # Quick check: read one var at this init, ensemble=0, level=0 (or just 2D)
-        sample = ds["t"].isel(init_time=int(init_idx[0]), ensemble=0, level=0).values
-        return bool(np.all(np.isfinite(sample)))
+        i = int(init_idx[0])
+        # Spot-check 3 var x 2 member x 2 level combinations
+        for v in ("t", "u", "z"):
+            for m in (0, 25):
+                for L in (0, 5):
+                    arr = ds[v].isel(init_time=i, ensemble=m, level=L).values
+                    if not np.all(np.isfinite(arr)):
+                        return False
+        # And surface var
+        for v in ("msl", "2t"):
+            for m in (0, 25):
+                arr = ds[v].isel(init_time=i, ensemble=m).values
+                if not np.all(np.isfinite(arr)):
+                    return False
+        return True
     except Exception:
         return False
+
+
+def _interpolate_missing_levels(ds: xr.Dataset) -> xr.Dataset:
+    """Inject missing 150 + 600 hPa PL via linear-in-log-p interpolation
+    from the adjacent archived levels."""
+    if "level" not in ds.dims:
+        return ds
+    present = set(int(L) for L in ds.level.values)
+    additions: list[xr.Dataset] = []
+    for new_L, (lo, hi) in INTERP_LEVELS.items():
+        if new_L in present:
+            continue
+        if lo not in present or hi not in present:
+            logging.warning("Cannot interpolate L=%d: missing %d or %d", new_L, lo, hi)
+            continue
+        log_lo, log_hi = np.log(lo), np.log(hi)
+        alpha = (np.log(new_L) - log_lo) / (log_hi - log_lo)
+        slab = (1 - alpha) * ds.sel(level=lo) + alpha * ds.sel(level=hi)
+        slab = slab.expand_dims({"level": [new_L]}).astype("float32")
+        additions.append(slab)
+    if additions:
+        ds = xr.concat([ds, *additions], dim="level").sortby("level", ascending=False)
+    return ds
+
+
+def _cleanup_earthkit_cache() -> None:
+    """Remove all mars-retriever-*.cache* files from the earthkit cache so the
+    next init starts with a clean disk. Cumulative cache would otherwise hit
+    ~1.3 TB across 224 inits."""
+    if not EARTHKIT_CACHE.exists():
+        return
+    for f in EARTHKIT_CACHE.glob("mars-retriever-*.cache*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
 
 
 def fetch_and_write_one(
@@ -209,6 +270,7 @@ def fetch_and_write_one(
         "class": "od",
         "date": date_token,
         "expver": "1",
+        "expect": "any",   # tolerate missing param/level combos (some PL not archived for type=pf step=0)
         "grid": "/".join(str(x) for x in GRID),
         "number": member_token,
         "step": "0",
@@ -242,6 +304,9 @@ def fetch_and_write_one(
     pl_ds = _normalise(pl_ds, has_level=True)
     sfc_ds = _normalise(sfc_ds, has_level=False)
 
+    # Interpolate 150 + 600 hPa from neighbours (log-pressure linear)
+    pl_ds = _interpolate_missing_levels(pl_ds)
+
     # Combine & write
     merged = xr.merge([pl_ds, sfc_ds], compat="override")
     merged = merged.expand_dims({"init_time": [np.datetime64(init_dt, "ns")]})
@@ -249,6 +314,9 @@ def fetch_and_write_one(
     logging.info("[%s] writing slice idx=%d to %s", init_dt, init_idx, out_path)
     merged.to_zarr(out_path, region={"init_time": slice(init_idx, init_idx + 1)},
                    consolidated=False)
+
+    # Free the GRIB cache so we don't accumulate ~6 GB per init
+    _cleanup_earthkit_cache()
     return True
 
 
@@ -334,16 +402,43 @@ def main() -> int:
     else:
         inits_to_do = list(enumerate(all_inits))
 
-    n_ok, n_fail = 0, 0
-    for idx, dt in inits_to_do:
-        try:
-            ok = fetch_and_write_one(out_path, dt, idx)
-            n_ok += int(ok)
-        except Exception as exc:
-            logging.exception("Failed for init %s: %s", dt, exc)
-            n_fail += 1
+    progress_file = out_path.parent / f"{out_path.stem}_progress.log"
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
 
-    logging.info("Done. ok=%d failed=%d", n_ok, n_fail)
+    n_ok, n_fail, n_skip = 0, 0, 0
+    t0_total = datetime.now()
+    n = len(inits_to_do)
+    for i, (idx, dt) in enumerate(inits_to_do, start=1):
+        t0 = datetime.now()
+        prefix = f"[{i:>3d}/{n}] init={dt}"
+        try:
+            was_present = already_written(out_path, dt)
+            ok = fetch_and_write_one(out_path, dt, idx)
+            elapsed = datetime.now() - t0
+            if was_present:
+                n_skip += 1
+                logging.info("%s SKIP (already written)  elapsed=%s", prefix, elapsed)
+            else:
+                n_ok += int(ok)
+                logging.info("%s OK  elapsed=%s", prefix, elapsed)
+            with progress_file.open("a") as pf:
+                pf.write(f"{datetime.now().isoformat()} {prefix} "
+                         f"{'SKIP' if was_present else 'OK' if ok else 'FAIL'} "
+                         f"elapsed={elapsed}\n")
+        except KeyboardInterrupt:
+            logging.warning("%s interrupted by user", prefix)
+            break
+        except Exception as exc:
+            n_fail += 1
+            logging.exception("%s FAILED: %s", prefix, exc)
+            with progress_file.open("a") as pf:
+                pf.write(f"{datetime.now().isoformat()} {prefix} FAIL "
+                         f"err={exc!r}\n")
+            # Continue with next init -- don't let one bad init kill the run.
+
+    total = datetime.now() - t0_total
+    logging.info("Done. ok=%d skipped=%d failed=%d total_time=%s",
+                 n_ok, n_skip, n_fail, total)
     return 0 if n_fail == 0 else 1
 
 
@@ -362,6 +457,7 @@ def _run_single_init_paranoia(init_dt: datetime) -> int:
         "class": "od",
         "date": date_token,
         "expver": "1",
+        "expect": "any",   # tolerate missing param/level combos
         "grid": "/".join(str(x) for x in GRID),
         "number": member_token,
         "step": "0",
