@@ -43,6 +43,7 @@ import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import dask.array as da
 import earthkit.data
 import numpy as np
 import xarray as xr
@@ -154,13 +155,17 @@ def init_zarr_store(
     shape_2d = (N_MEMBERS, n_init, LAT_N, LON_N)
     inner_2d = _make_inner_chunks(dims_2d, dict(zip(dims_2d, shape_2d)))
 
+    # fill_value=NaN so unwritten cells read as NaN, not 0.0. Use dask.full
+    # (lazy, no RAM cost) + compute=False -- np.empty leaks zeros into the
+    # zarr at to_zarr time and fill_value in encoding is then ignored.
+    nan32 = np.float32("nan")
     encoding: dict[str, dict] = {}
     for short in PL_PARAMS.values():
-        ds[short] = (dims_3d, np.empty(shape_3d, dtype="float32"))
-        encoding[short] = {"chunks": inner_3d, "shards": shape_3d}
+        ds[short] = (dims_3d, da.full(shape_3d, nan32, dtype="float32", chunks=inner_3d))
+        encoding[short] = {"chunks": inner_3d, "shards": shape_3d, "fill_value": nan32}
     for short in SFC_PARAMS.values():
-        ds[short] = (dims_2d, np.empty(shape_2d, dtype="float32"))
-        encoding[short] = {"chunks": inner_2d, "shards": shape_2d}
+        ds[short] = (dims_2d, da.full(shape_2d, nan32, dtype="float32", chunks=inner_2d))
+        encoding[short] = {"chunks": inner_2d, "shards": shape_2d, "fill_value": nan32}
 
     # Coord encodings (small dims, default chunks)
     for c in ("ensemble", "init_time", "level", "latitude", "longitude"):
@@ -221,18 +226,19 @@ def already_written(out_path: Path, init_dt: datetime) -> bool:
         if len(init_idx) == 0:
             return False
         i = int(init_idx[0])
-        # Spot-check 3 var x 2 member x 2 level combinations
+        # Spot-check 3 var x 2 member x 2 level combinations. Reject NaN AND
+        # all-zero (defense against a stale template with default fill_value=0;
+        # no real T/U/Z field over the globe is exactly 0 everywhere).
         for v in ("t", "u", "z"):
             for m in (0, 25):
                 for L in (0, 5):
                     arr = ds[v].isel(init_time=i, ensemble=m, level=L).values
-                    if not np.all(np.isfinite(arr)):
+                    if not np.all(np.isfinite(arr)) or not np.any(arr):
                         return False
-        # And surface var
         for v in ("msl", "2t"):
             for m in (0, 25):
                 arr = ds[v].isel(init_time=i, ensemble=m).values
-                if not np.all(np.isfinite(arr)):
+                if not np.all(np.isfinite(arr)) or not np.any(arr):
                     return False
         return True
     except Exception:
