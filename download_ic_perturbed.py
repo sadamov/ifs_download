@@ -341,6 +341,13 @@ def fetch_and_write_one(
     merged = xr.merge([pl_ds, sfc_ds], compat="override")
     merged = merged.expand_dims({"init_time": [np.datetime64(init_dt, "ns")]})
 
+    # Drop dim-coord variables that don't share init_time -- xarray's region
+    # write rejects coords that don't intersect the region's dims. The template
+    # store already has these coord values written at init_zarr_store time.
+    drop = [c for c in ("ensemble", "level", "latitude", "longitude") if c in merged.variables]
+    if drop:
+        merged = merged.drop_vars(drop)
+
     logging.info("[%s] writing slice idx=%d to %s", init_dt, init_idx, out_path)
     merged.to_zarr(out_path, region={"init_time": slice(init_idx, init_idx + 1)},
                    consolidated=False)
