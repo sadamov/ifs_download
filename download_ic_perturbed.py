@@ -184,8 +184,32 @@ INTERP_LEVELS = {
     600: (500, 700),   # f(600) = 0.46*f(500) + 0.54*f(700)
 }
 
-# Earthkit cache root -- where MARS GRIBs land before earthkit reads them
-EARTHKIT_CACHE = Path("/capstor/store/cscs/swissai/a122/IFS/.earthkit-cache")
+# Earthkit cache root -- where MARS GRIBs land before earthkit reads them.
+# Pinned to /iopsstor/scratch so the login node disk never accumulates GRIB
+# spill. The cleanup helper below removes files after each successful init,
+# but this is the belt-and-suspenders location.
+EARTHKIT_CACHE = Path("/iopsstor/scratch/cscs/sadamov/earthkit_cache")
+
+
+def _configure_earthkit_cache() -> None:
+    """Force the earthkit-data cache onto /iopsstor/scratch and set it BEFORE
+    any earthkit MARS call. Without this, the default user-cache-directory
+    from the user's config file (currently /capstor/...) would be used and
+    every PL request would write 6+ GB to capstor before we get a chance
+    to clean it up."""
+    EARTHKIT_CACHE.mkdir(parents=True, exist_ok=True)
+    import earthkit.data as ed
+    ed.config.set("cache-policy", "user")
+    ed.config.set("user-cache-directory", str(EARTHKIT_CACHE))
+    ed.config.set("temporary-cache-directory-root", str(EARTHKIT_CACHE))
+    ed.config.set("temporary-directory-root", str(EARTHKIT_CACHE))
+    # Two caps: an absolute size limit AND a percent-of-disk floor.
+    # maximum-cache-size accepts absolute units (G, M, etc); maximum-cache-disk-usage
+    # is percent-only. Keep cache well below 20 GB -- ONE init's PL+SFC GRIB is
+    # ~6 GB so this leaves comfortable headroom and forces cleanup quickly.
+    ed.config.set("maximum-cache-size", "20G")
+    ed.config.set("maximum-cache-disk-usage", "95%")
+    logging.info("earthkit cache: %s", ed.config.get("user-cache-directory"))
 
 
 def already_written(out_path: Path, init_dt: datetime) -> bool:
@@ -382,6 +406,10 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+
+    # FORCE the earthkit cache to /iopsstor/scratch BEFORE any MARS call.
+    # Login-node safety: prevents 6 GB per request from landing on capstor.
+    _configure_earthkit_cache()
 
     all_inits = build_init_times()
     logging.info("Total init_times to consider: %d", len(all_inits))
